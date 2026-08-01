@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
@@ -8,6 +9,28 @@ use super::{
     BackendError, HerdrBackend, SplitOpts, TabCreated, TabOpts, WorkspaceCreated, WorkspaceOpts,
 };
 use crate::config::{SplitDirection, WaitFor};
+
+/// Environment variable overriding the minimum wait before a command is sent.
+const READY_FLOOR_ENV: &str = "HERDR_SPREADER_READY_FLOOR_MS";
+/// Environment variable overriding how long to wait for a pane to settle.
+const READY_TIMEOUT_ENV: &str = "HERDR_SPREADER_READY_TIMEOUT_MS";
+/// Minimum time to wait before sending a command to a freshly created pane.
+const DEFAULT_READY_FLOOR_MS: u64 = 1_500;
+/// Upper bound on waiting for a pane to settle before sending anyway.
+const DEFAULT_READY_TIMEOUT_MS: u64 = 10_000;
+/// How often the pane is polled while waiting for it to settle.
+const READY_POLL_INTERVAL: Duration = Duration::from_millis(300);
+/// Consecutive identical reads required before a pane counts as settled.
+const READY_STABLE_POLLS: u32 = 3;
+
+/// Parse a millisecond duration, falling back when unset or unparseable.
+fn parse_ms(value: Option<&str>, fallback: u64) -> u64 {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(fallback)
+}
 
 pub(crate) fn workspace_create_args(opts: &WorkspaceOpts) -> Vec<String> {
     let mut args = vec!["workspace".to_string(), "create".to_string()];
@@ -253,17 +276,79 @@ pub(crate) fn choose_focus_strategy(socket_path: Option<&str>) -> FocusStrategy 
 pub struct CliBackend {
     bin: PathBuf,
     socket_path: Option<PathBuf>,
+    ready_floor: Duration,
+    ready_timeout: Duration,
 }
 
 impl CliBackend {
     #[must_use]
     pub fn new(bin: PathBuf, socket_path: Option<PathBuf>) -> Self {
-        Self { bin, socket_path }
+        Self {
+            bin,
+            socket_path,
+            ready_floor: Duration::from_millis(parse_ms(
+                std::env::var(READY_FLOOR_ENV).ok().as_deref(),
+                DEFAULT_READY_FLOOR_MS,
+            )),
+            ready_timeout: Duration::from_millis(parse_ms(
+                std::env::var(READY_TIMEOUT_ENV).ok().as_deref(),
+                DEFAULT_READY_TIMEOUT_MS,
+            )),
+        }
+    }
+
+    /// Override how long `run` waits for a pane's shell to become ready.
+    ///
+    /// A zero timeout disables the wait entirely, which is useful in tests
+    /// that drive the backend against a scripted fake `herdr` binary and
+    /// assert on the exact argv sequence.
+    #[must_use]
+    pub fn with_ready_settings(mut self, floor: Duration, timeout: Duration) -> Self {
+        self.ready_floor = floor;
+        self.ready_timeout = timeout;
+        self
     }
 
     pub fn resolve_bin(env: &BTreeMap<String, String>) -> PathBuf {
         env.get("HERDR_BIN_PATH")
             .map_or_else(|| PathBuf::from(DEFAULT_HERDR_BIN), PathBuf::from)
+    }
+
+    /// Block until the pane's shell is ready to accept a typed command.
+    ///
+    /// A pane that was just created has a shell which has not started its line
+    /// editor yet. Text sent before that point is echoed to the PTY and then
+    /// discarded during shell startup, so the command silently never runs, or
+    /// arrives truncated. Poll the pane and wait for its output to stop
+    /// changing, which indicates the prompt has finished painting.
+    ///
+    /// Output stability alone is not sufficient: prompts such as
+    /// powerlevel10k's "instant prompt" paint very early, so the pane looks
+    /// settled while the real line editor still does not exist. A minimum
+    /// floor is therefore enforced on top of the stability check.
+    fn wait_shell_ready(&self, pane_id: &str) {
+        let (floor, timeout) = (self.ready_floor, self.ready_timeout);
+        let read_args = vec!["pane".to_string(), "read".to_string(), pane_id.to_string()];
+        let started = Instant::now();
+        let mut previous: Option<String> = None;
+        let mut stable_polls = 0_u32;
+
+        while started.elapsed() < timeout {
+            std::thread::sleep(READY_POLL_INTERVAL);
+            let current = self.exec(&read_args).unwrap_or_default();
+
+            if previous.as_deref() == Some(current.as_str()) {
+                stable_polls += 1;
+            } else {
+                stable_polls = 0;
+            }
+            previous = Some(current.clone());
+
+            let settled = !current.trim().is_empty() && stable_polls >= READY_STABLE_POLLS;
+            if settled && started.elapsed() >= floor {
+                return;
+            }
+        }
     }
 
     fn exec(&self, args: &[String]) -> Result<String, BackendError> {
@@ -401,6 +486,7 @@ impl HerdrBackend for CliBackend {
     }
 
     fn run(&mut self, pane_id: &str, command: &str) -> Result<(), BackendError> {
+        self.wait_shell_ready(pane_id);
         self.exec(&pane_run_args(pane_id, command))?;
         Ok(())
     }
@@ -430,6 +516,22 @@ mod tests {
     use super::*;
     use crate::backend::{SplitOpts, TabOpts, WorkspaceOpts};
     use crate::config::{SplitDirection, WaitFor};
+
+    #[test]
+    fn should_fall_back_to_default_ms_when_value_is_absent_or_invalid() {
+        assert_eq!(parse_ms(None, 1_500), 1_500);
+        assert_eq!(parse_ms(Some(""), 1_500), 1_500);
+        assert_eq!(parse_ms(Some("   "), 1_500), 1_500);
+        assert_eq!(parse_ms(Some("soon"), 1_500), 1_500);
+        assert_eq!(parse_ms(Some("-1"), 1_500), 1_500);
+    }
+
+    #[test]
+    fn should_parse_ms_overrides_including_zero_and_surrounding_whitespace() {
+        assert_eq!(parse_ms(Some("0"), 1_500), 0);
+        assert_eq!(parse_ms(Some("250"), 1_500), 250);
+        assert_eq!(parse_ms(Some(" 2500 "), 1_500), 2_500);
+    }
 
     #[test]
     fn should_build_workspace_create_argv_with_cwd_label_env_and_no_focus() {
