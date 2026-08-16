@@ -106,6 +106,23 @@ herdr-spreader apply [--file <path>]
 | `-f, --file <path>` | Path to a layout YAML file. If omitted, searched in `$HERDR_PLUGIN_CONFIG_DIR/` (set automatically when run as a herdr plugin), then `$XDG_CONFIG_HOME/herdr-spreader/`, then `$HOME/.config/herdr-spreader/`. Each directory is checked for `config.yaml` then `config.yml`. Run `herdr plugin config-dir herdr-spreader` to see or create the plugin config directory. |
 | `--dry-run` | Print the plan of operations that would be performed (one `BackendOp` per line) without spawning `herdr` or modifying any workspace. Path resolution still runs, so the printed paths reflect your real `root`/`cwd`/`~` expansion — only execution is skipped. |
 
+### Shell readiness
+
+A pane that was just created has a shell which has not started its line editor
+yet. A command sent before that point is echoed to the PTY and then discarded
+during shell startup, so it silently never runs, or arrives truncated.
+`herdr-spreader` therefore waits for each new pane to settle before sending its
+`command`. The defaults suit a heavyweight interactive shell — Oh My Zsh,
+powerlevel10k, a `fastfetch` banner — and rarely need changing.
+
+| Environment variable | Default | Description |
+|---|---|---|
+| `HERDR_SPREADER_READY_FLOOR_MS` | `1500` | Minimum wait before a command is sent to a new pane. A floor is needed on top of the settle check because prompts such as powerlevel10k's *instant prompt* paint very early, which makes a pane look ready while its real line editor still does not exist. |
+| `HERDR_SPREADER_READY_TIMEOUT_MS` | `10000` | Upper bound on waiting for a pane to settle, after which the command is sent anyway. Set to `0` to disable waiting entirely. |
+
+Raise the floor if commands are still swallowed on a slow machine; lower it, or
+set the timeout to `0`, for a minimal shell that starts instantly.
+
 ## Configuration reference
 
 A layout file has four levels: the **file** (top level), **workspaces**, **tabs**, and **panes** (splits within a tab) — mirroring herdr's own workspace → tab → pane model, with the file itself holding a list of workspaces so one YAML file can describe more than one.

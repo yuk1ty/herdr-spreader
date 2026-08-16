@@ -24,6 +24,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use herdr_spreader::backend::cli::CliBackend;
 use herdr_spreader::backend::{SplitOpts, TabOpts, WorkspaceOpts};
@@ -111,7 +112,8 @@ fn should_thread_ids_and_apply_focus_via_create_flags_across_two_workspaces_agai
     }
 
     let file = build_spread_file();
-    let mut backend = CliBackend::new(fake_herdr_path(), None);
+    let mut backend = CliBackend::new(fake_herdr_path(), None)
+        .with_ready_settings(Duration::ZERO, Duration::ZERO);
 
     engine::apply(&file, &mut backend).expect("apply against fake herdr should succeed");
 
@@ -176,7 +178,8 @@ fn should_focus_second_pane_when_focus_true_is_on_second_pane() {
     }
 
     let file = build_spread_file_with_focus_on_second_pane();
-    let mut backend = CliBackend::new(fake_herdr_path(), None);
+    let mut backend = CliBackend::new(fake_herdr_path(), None)
+        .with_ready_settings(Duration::ZERO, Duration::ZERO);
 
     engine::apply(&file, &mut backend).expect("apply against fake herdr should succeed");
 
