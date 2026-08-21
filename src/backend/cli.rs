@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use super::{
-    BackendError, HerdrBackend, SplitOpts, TabCreated, TabOpts, WorkspaceCreated, WorkspaceOpts,
+    BackendError, HerdrBackend, SplitOpts, TabCreated, TabOpts, TabSummary, WorkspaceCreated,
+    WorkspaceOpts, WorkspaceSummary,
 };
 use crate::config::{SplitDirection, WaitFor};
 
@@ -85,6 +86,27 @@ pub(crate) fn focus_args(pane_id: &str) -> Vec<String> {
         pane_id.to_string(),
         "--direction".to_string(),
         "left".to_string(),
+    ]
+}
+
+pub(crate) fn workspace_list_args() -> Vec<String> {
+    vec!["workspace".to_string(), "list".to_string()]
+}
+
+pub(crate) fn tab_list_args(workspace_id: &str) -> Vec<String> {
+    vec![
+        "tab".to_string(),
+        "list".to_string(),
+        "--workspace".to_string(),
+        workspace_id.to_string(),
+    ]
+}
+
+pub(crate) fn workspace_focus_args(workspace_id: &str) -> Vec<String> {
+    vec![
+        "workspace".to_string(),
+        "focus".to_string(),
+        workspace_id.to_string(),
     ]
 }
 
@@ -204,6 +226,56 @@ struct PaneInfoBody {
 pub(crate) fn parse_pane_split(json: &str) -> Result<String, BackendError> {
     let body: PaneInfoBody = parse_envelope(json)?;
     Ok(body.pane.pane_id)
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkspaceListBody {
+    #[serde(default)]
+    workspaces: Vec<WorkspaceListEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkspaceListEntry {
+    workspace_id: String,
+    #[serde(default)]
+    label: Option<String>,
+}
+
+pub(crate) fn parse_workspace_list(json: &str) -> Result<Vec<WorkspaceSummary>, BackendError> {
+    let body: WorkspaceListBody = parse_envelope(json)?;
+    Ok(body
+        .workspaces
+        .into_iter()
+        .map(|w| WorkspaceSummary {
+            workspace_id: w.workspace_id,
+            label: w.label,
+        })
+        .collect())
+}
+
+#[derive(Debug, Deserialize)]
+struct TabListBody {
+    #[serde(default)]
+    tabs: Vec<TabListEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TabListEntry {
+    tab_id: String,
+    #[serde(default)]
+    label: Option<String>,
+}
+
+pub(crate) fn parse_tab_list(json: &str) -> Result<Vec<TabSummary>, BackendError> {
+    let body: TabListBody = parse_envelope(json)?;
+    Ok(body
+        .tabs
+        .into_iter()
+        .map(|t| TabSummary {
+            tab_id: t.tab_id,
+            label: t.label,
+        })
+        .collect())
 }
 
 pub(crate) fn pane_get_args(pane_id: &str) -> Vec<String> {
@@ -407,6 +479,21 @@ impl HerdrBackend for CliBackend {
 
     fn wait_output(&mut self, pane_id: &str, wait: &WaitFor) -> Result<(), BackendError> {
         self.exec(&wait_output_args(pane_id, wait))?;
+        Ok(())
+    }
+
+    fn list_workspaces(&mut self) -> Result<Vec<WorkspaceSummary>, BackendError> {
+        let stdout = self.exec(&workspace_list_args())?;
+        parse_workspace_list(&stdout)
+    }
+
+    fn list_tabs(&mut self, workspace_id: &str) -> Result<Vec<TabSummary>, BackendError> {
+        let stdout = self.exec(&tab_list_args(workspace_id))?;
+        parse_tab_list(&stdout)
+    }
+
+    fn focus_workspace(&mut self, workspace_id: &str) -> Result<(), BackendError> {
+        self.exec(&workspace_focus_args(workspace_id))?;
         Ok(())
     }
 

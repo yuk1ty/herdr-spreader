@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `--on-existing <create|skip|sync>`, making a re-run idempotent. `skip` leaves a
+  workspace whose label already exists untouched; `sync` keeps it and adds only
+  the tabs it is missing, matched by label, without disturbing the ones already
+  there. The default stays `create`, the previous build-regardless behaviour.
+
 ## [0.2.1](https://github.com/yuk1ty/herdr-spreader/compare/v0.2.0...v0.2.1) - 2026-08-16
 
 ### Fixed

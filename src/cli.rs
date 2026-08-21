@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+
+use crate::engine;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -12,6 +14,30 @@ pub struct Cli {
     pub command: Command,
 }
 
+/// What to do about a workspace whose label already exists.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+pub enum OnExistingArg {
+    /// Build the layout anyway, producing a second workspace with the same
+    /// label. The behaviour this tool has always had.
+    #[default]
+    Create,
+    /// Leave an existing workspace untouched and build nothing for it.
+    Skip,
+    /// Keep an existing workspace and add only the tabs it is missing, matched
+    /// by label.
+    Sync,
+}
+
+impl From<OnExistingArg> for engine::OnExisting {
+    fn from(value: OnExistingArg) -> Self {
+        match value {
+            OnExistingArg::Create => Self::Create,
+            OnExistingArg::Skip => Self::Skip,
+            OnExistingArg::Sync => Self::Sync,
+        }
+    }
+}
+
 #[derive(Debug, Subcommand, PartialEq)]
 pub enum Command {
     Apply {
@@ -19,6 +45,9 @@ pub enum Command {
         file: Option<PathBuf>,
         #[arg(long)]
         dry_run: bool,
+        /// What to do about a workspace whose label already exists.
+        #[arg(long, value_enum, default_value_t = OnExistingArg::Create)]
+        on_existing: OnExistingArg,
     },
 }
 
@@ -35,6 +64,7 @@ mod tests {
             Command::Apply {
                 file: Some(PathBuf::from("./spread.yml")),
                 dry_run: false,
+                on_existing: OnExistingArg::Create,
             }
         );
 
@@ -43,7 +73,8 @@ mod tests {
             cli.command,
             Command::Apply {
                 file: None,
-                dry_run: false
+                dry_run: false,
+                on_existing: OnExistingArg::Create,
             }
         );
 
@@ -53,6 +84,7 @@ mod tests {
             Command::Apply {
                 file: Some(PathBuf::from("./spread.yml")),
                 dry_run: false,
+                on_existing: OnExistingArg::Create,
             }
         );
     }
@@ -64,7 +96,8 @@ mod tests {
             cli.command,
             Command::Apply {
                 file: None,
-                dry_run: true
+                dry_run: true,
+                on_existing: OnExistingArg::Create,
             }
         );
         let cli =
@@ -73,7 +106,8 @@ mod tests {
             cli.command,
             Command::Apply {
                 file: Some(PathBuf::from("x")),
-                dry_run: true
+                dry_run: true,
+                on_existing: OnExistingArg::Create,
             }
         );
         let cli = Cli::try_parse_from(["herdr-spreader", "apply"]).unwrap();
@@ -81,7 +115,8 @@ mod tests {
             cli.command,
             Command::Apply {
                 file: None,
-                dry_run: false
+                dry_run: false,
+                on_existing: OnExistingArg::Create,
             }
         );
     }
