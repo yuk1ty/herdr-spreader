@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `apply` now reports what it did, one line per workspace
+  (`created` / `updated (+N tabs)` / `unchanged` / `skipped`). Previously it
+  printed nothing at all, which under `--on-existing sync` is indistinguishable
+  from having failed.
 - The plugin's `Apply layout` menu action now runs `--on-existing sync`, with a
   second `Apply layout (build a new copy)` action for the previous behaviour.
 - `--on-existing <create|skip|sync>`, making a re-run idempotent. `skip` leaves a

@@ -122,6 +122,16 @@ herdr-spreader apply --on-existing skip       # already up? leave it exactly as 
 herdr-spreader apply --on-existing sync       # already up? add only the tabs it is missing
 ```
 
+`apply` reports what it did, one line per workspace, so a run that changed nothing says so instead of exiting silently:
+
+```
+  unchanged  frontend
+  updated    backend (+1 tab)
+  created    docs (3 tabs)
+```
+
+**You do not need to run this every time you sit down.** The herdr server keeps your workspaces, tabs, panes and their directories by itself, so a fresh terminal only needs `herdr` to reattach. `apply` is for when the *layout* has changed — you edited a layout file, or added a repository to the config — and for a first run on a machine. Note that a server restart brings panes back as bare shells: the tabs are still there, so `sync` considers them present and will not re-run their commands.
+
 `sync` is additive and matches tabs by label. A tab that already exists is left untouched — panes, commands and all — because a pane may be part-way through a build and nothing here can tell. A tab with no `label` is left to a full build, since it could not be recognised on the next run and would otherwise be added again every time.
 
 Matching is on the workspace `name` against the herdr workspace label. herdr permits two workspaces with the same label; a layout cannot tell them apart, so the first one wins and any others are left alone.

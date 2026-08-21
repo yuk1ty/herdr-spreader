@@ -498,6 +498,102 @@ pub fn plan_file(file: &SpreadFile) -> Vec<BackendOp> {
     plan_file_with_state(file, &ExistingState::default(), OnExisting::Create)
 }
 
+/// What `apply` did to one workspace, for reporting back to the person who ran it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Outcome {
+    /// Built from nothing, with this many tabs.
+    Created(usize),
+    /// Already existed; this many tabs were added to it.
+    Synced(usize),
+    /// Already existed and matched the layout; nothing was done.
+    Unchanged,
+    /// Already existed and was deliberately left alone.
+    Skipped,
+}
+
+/// One line of the report: a workspace and what happened to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceOutcome {
+    pub name: String,
+    pub outcome: Outcome,
+}
+
+impl WorkspaceOutcome {
+    /// The one-line form printed after an apply.
+    #[must_use]
+    pub fn render(&self) -> String {
+        match self.outcome {
+            Outcome::Created(tabs) => {
+                format!("  created    {} ({})", self.name, plural(tabs, "tab"))
+            }
+            Outcome::Synced(added) => {
+                format!("  updated    {} (+{})", self.name, plural(added, "tab"))
+            }
+            Outcome::Unchanged => format!("  unchanged  {}", self.name),
+            Outcome::Skipped => format!("  skipped    {} (already up)", self.name),
+        }
+    }
+}
+
+fn plural(n: usize, noun: &str) -> String {
+    if n == 1 {
+        format!("{n} {noun}")
+    } else {
+        format!("{n} {noun}s")
+    }
+}
+
+/// Describe what a plan will do (or did), workspace by workspace.
+///
+/// A Calculation over the same inputs the planner takes, so the report can be
+/// produced without watching the run — and cannot drift from it, because it is
+/// derived from the very operations that run.
+#[must_use]
+pub fn summarize(
+    file: &SpreadFile,
+    state: &ExistingState,
+    on_existing: OnExisting,
+) -> Vec<WorkspaceOutcome> {
+    file.workspaces
+        .iter()
+        .map(|ws| {
+            let ops = plan_workspace_with_state(ws, state, on_existing);
+            let created_tabs = ops
+                .iter()
+                .filter(|op| {
+                    matches!(
+                        op,
+                        BackendOp::CreateTab { .. } | BackendOp::RenameFirstTab { .. }
+                    )
+                })
+                .count();
+            let outcome = if ops
+                .iter()
+                .any(|op| matches!(op, BackendOp::CreateWorkspace(_)))
+            {
+                // A workspace whose first tab carries no label gets no
+                // RenameFirstTab, so count the layout rather than the ops.
+                Outcome::Created(ws.tabs.len())
+            } else if ops
+                .iter()
+                .any(|op| matches!(op, BackendOp::UseWorkspace { .. }))
+            {
+                if created_tabs == 0 {
+                    Outcome::Unchanged
+                } else {
+                    Outcome::Synced(created_tabs)
+                }
+            } else {
+                Outcome::Skipped
+            };
+            WorkspaceOutcome {
+                name: ws.name.clone(),
+                outcome,
+            }
+        })
+        .collect()
+}
+
 /// Plan every workspace in a file against what already exists on the server.
 #[must_use]
 pub fn plan_file_with_state(
@@ -2399,5 +2495,79 @@ mod tests {
         };
 
         assert_eq!(state.workspace_id("demo"), None);
+    }
+
+    #[test]
+    fn should_report_what_happened_to_each_workspace() {
+        let file = SpreadFile {
+            workspaces: vec![
+                workspace_named("already-current"),
+                workspace_named("needs-a-tab"),
+                workspace_named("brand-new"),
+            ],
+        };
+        let mut state = state_with("already-current", "wA", &["editor", "server"]);
+        state.workspaces.push(WorkspaceSummary {
+            workspace_id: "wB".to_string(),
+            label: Some("needs-a-tab".to_string()),
+        });
+        state.tabs.insert(
+            "wB".to_string(),
+            vec![TabSummary {
+                tab_id: "wB:t1".to_string(),
+                label: Some("editor".to_string()),
+            }],
+        );
+
+        let report = engine::summarize(&file, &state, engine::OnExisting::Sync);
+
+        assert_eq!(
+            report.iter().map(|o| o.outcome.clone()).collect::<Vec<_>>(),
+            vec![
+                engine::Outcome::Unchanged,
+                engine::Outcome::Synced(1),
+                engine::Outcome::Created(2),
+            ]
+        );
+    }
+
+    #[test]
+    fn should_report_an_existing_workspace_as_skipped_under_skip() {
+        let file = SpreadFile {
+            workspaces: vec![workspace_named("demo")],
+        };
+        let state = state_with("demo", "wA", &["editor"]);
+
+        let report = engine::summarize(&file, &state, engine::OnExisting::Skip);
+
+        assert_eq!(report[0].outcome, engine::Outcome::Skipped);
+        assert!(report[0].render().contains("skipped"));
+    }
+
+    #[test]
+    fn should_report_every_workspace_as_created_under_the_default_policy() {
+        let file = SpreadFile {
+            workspaces: vec![workspace_named("demo")],
+        };
+        let state = state_with("demo", "wA", &["editor", "server"]);
+
+        let report = engine::summarize(&file, &state, engine::OnExisting::Create);
+
+        assert_eq!(report[0].outcome, engine::Outcome::Created(2));
+    }
+
+    #[test]
+    fn should_render_singular_and_plural_tab_counts() {
+        let one = engine::WorkspaceOutcome {
+            name: "demo".to_string(),
+            outcome: engine::Outcome::Synced(1),
+        };
+        let many = engine::WorkspaceOutcome {
+            name: "demo".to_string(),
+            outcome: engine::Outcome::Created(3),
+        };
+
+        assert!(one.render().contains("+1 tab)"), "{}", one.render());
+        assert!(many.render().contains("(3 tabs)"), "{}", many.render());
     }
 }
