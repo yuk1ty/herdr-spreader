@@ -5,8 +5,9 @@ use clap::Parser;
 
 use herdr_spreader::backend::cli::CliBackend;
 use herdr_spreader::cli::{Cli, Command};
-use herdr_spreader::config::{read_config, resolve_config_path, resolve_paths};
+use herdr_spreader::config::resolve_config_path;
 use herdr_spreader::engine;
+use herdr_spreader::include;
 use herdr_spreader::validate;
 
 fn main() -> anyhow::Result<()> {
@@ -16,17 +17,6 @@ fn main() -> anyhow::Result<()> {
     match cli.command {
         Command::Apply { file, dry_run } => {
             let config_path = resolve_config_path(file, &env)?;
-            let contents = read_config(&config_path)?;
-            let spread_file = match validate::validate_config(validate::SourceFile {
-                yaml: &contents,
-                path: &config_path,
-            }) {
-                Ok(f) => f,
-                Err(findings) => {
-                    validate::print_findings(&findings);
-                    std::process::exit(1);
-                }
-            };
 
             let bin = CliBackend::resolve_bin(&env);
             let socket_path = env.get("HERDR_SOCKET_PATH").map(PathBuf::from);
@@ -39,7 +29,17 @@ fn main() -> anyhow::Result<()> {
                 Some(cwd) => cwd,
                 None => std::env::current_dir()?,
             };
-            let spread_file = resolve_paths(&spread_file, &env, &cwd);
+            // Paths in the root file resolve against the invocation directory, as
+            // they always have; each included file resolves its own against its
+            // own directory, which is what makes a repository-local layout
+            // portable. Both happen inside the loader.
+            let spread_file = match include::load_flat(&config_path, &cwd, &env) {
+                Ok(f) => f,
+                Err(findings) => {
+                    validate::print_findings(&findings);
+                    std::process::exit(1);
+                }
+            };
 
             if dry_run {
                 let plan = engine::plan_file(&spread_file);

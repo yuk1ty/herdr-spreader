@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `include:` entries, so a layout can live in the repository whose commands it
+  names while the global config stays the entry point. Relative paths inside an
+  included file resolve against that file's own directory; `optional: true`
+  tolerates a repository that is not checked out on this machine. Include cycles,
+  chains deeper than 16 files, and duplicate workspace names across files are
+  reported rather than built.
+
 ## [0.2.1](https://github.com/yuk1ty/herdr-spreader/compare/v0.2.0...v0.2.1) - 2026-08-16
 
 ### Fixed
