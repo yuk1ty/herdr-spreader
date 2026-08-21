@@ -351,18 +351,20 @@ workspaces:
         assert_eq!(source.workspaces.len(), 3);
         match &source.workspaces[0] {
             WorkspaceEntry::Inline(ws) => assert_eq!(ws.name, "inline"),
-            other => panic!("expected an inline workspace, got {other:?}"),
+            other @ WorkspaceEntry::Include(_) => {
+                panic!("expected an inline workspace, got {other:?}")
+            }
         }
         match &source.workspaces[1] {
             WorkspaceEntry::Include(inc) => {
                 assert_eq!(inc.include, PathBuf::from("~/code/api"));
                 assert!(!inc.optional, "optional should default to false");
             }
-            other => panic!("expected an include, got {other:?}"),
+            other @ WorkspaceEntry::Inline(_) => panic!("expected an include, got {other:?}"),
         }
         match &source.workspaces[2] {
             WorkspaceEntry::Include(inc) => assert!(inc.optional),
-            other => panic!("expected an include, got {other:?}"),
+            other @ WorkspaceEntry::Inline(_) => panic!("expected an include, got {other:?}"),
         }
     }
 

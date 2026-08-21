@@ -161,6 +161,8 @@ workspaces:
 | `include` | path (required) | A layout file, or a directory holding one. Relative paths resolve against the directory of the file doing the including — never the invocation directory — so a checkout can move without the file changing. `~` expands to your home directory. |
 | `optional` | boolean | Skip silently when the target does not exist, instead of failing. For a repository that is not checked out on this machine. Default: `false`. |
 
+A worked pair of files is in [`examples/config-with-includes.yaml`](./examples/config-with-includes.yaml) and [`examples/repo-layout.yaml`](./examples/repo-layout.yaml).
+
 The included file is an ordinary layout file: it has its own `workspaces` list, it can include others in turn, and its workspaces are spliced into the including file's list at that position, in order.
 
 **Relative paths inside an included file resolve against that file's own directory.** A workspace with no `root` gets the directory of the file that declared it, and every relative tab/pane `cwd` layers on top of that. This is what lets a repository's layout file contain no absolute paths at all and still work on any machine, and in any worktree of that repository. The *top-level* file keeps the old behaviour — its relative paths resolve against the directory you invoked the command from — so existing configs are unaffected.

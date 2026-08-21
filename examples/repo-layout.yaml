@@ -1,0 +1,29 @@
+# What lives in a repository, as `.herdr-spreader.yaml` in its root, pulled in
+# by an `include:` from the global config (see config-with-includes.yaml).
+#
+# Note that it names no absolute paths and no machine. Relative paths resolve
+# against this file's own directory, so the same file works on every machine
+# and in every worktree of this repository.
+workspaces:
+  - name: my-project
+    tabs:
+      - label: editor
+        cwd: ./src
+        panes:
+          - command: nvim
+            focus: true
+
+      - label: server
+        cwd: ./api
+        panes:
+          - command: just dev
+            wait_for:
+              match: "listening"
+              timeout_ms: 10000
+          - split: down
+            ratio: 0.3
+            command: just test-watch
+
+      - label: ad-hoc      # no command: just a shell, in the repo root
+        panes:
+          - {}

@@ -1,0 +1,19 @@
+# A global config that owns nothing but the guest list.
+#
+# Each repository keeps its own layout in a `.herdr-spreader.yaml` beside its
+# code (see repo-layout.yaml), so tabs and commands travel with the project and
+# work in any checkout of it. This file decides which of them take part — and,
+# because an included layout can run commands on your machine, adding a line
+# here is the deliberate act that permits it.
+workspaces:
+  - include: ~/code/my-project          # a repo: looks for .herdr-spreader.yaml inside
+  - include: ~/code/api/layout.yaml     # or name the file directly
+  - include: ~/code/occasional
+    optional: true                      # not cloned on this machine? skip it
+
+  # Inline workspaces still work, and can be mixed in freely.
+  - name: scratch
+    tabs:
+      - label: notes
+        panes:
+          - command: nvim
