@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The plugin's `Apply layout` menu action now runs `--on-existing sync`, with a
+  second `Apply layout (build a new copy)` action for the previous behaviour.
 - `--on-existing <create|skip|sync>`, making a re-run idempotent. `skip` leaves a
   workspace whose label already exists untouched; `sync` keeps it and adds only
   the tabs it is missing, matched by label, without disturbing the ones already

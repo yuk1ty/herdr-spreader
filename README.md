@@ -84,6 +84,8 @@ herdr plugin action invoke herdr-spreader.apply
 
 or trigger it from herdr's action menu (`Apply layout`).
 
+The menu's `Apply layout` runs with `--on-existing sync`, because that is the action people invoke repeatedly: it adds what the layout describes and is missing, and disturbs nothing already there. `Apply layout (build a new copy)` beside it is the plain `create` behaviour, for deliberately building a second copy.
+
 ### As a standalone CLI
 
 ```bash
