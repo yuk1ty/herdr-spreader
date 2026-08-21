@@ -8,7 +8,9 @@ This document explains how `herdr-spreader` is put together: the module boundari
 src/
 ├── main.rs        thin CLI entry point: wires config → engine → backend together
 ├── cli.rs         clap argument parsing (`apply --file <path>`)
-├── config.rs       YAML → SpreadFile (a list of Workspaces), plus all path resolution (root/cwd/tilde)
+├── config.rs       YAML → SpreadSource (what is on disk) and SpreadFile (a list of Workspaces), plus all path resolution (root/cwd/tilde)
+├── include.rs      expands `include:` entries into one flat SpreadFile: file reads are Actions, candidate-path building is a Calculation
+├── validate.rs     semantic checks over a SpreadFile, reported as findings rather than thrown
 ├── engine.rs       pure plan logic (`plan_workspace`, `plan_file` — Calculations) + `execute_plan` Action + `BackendOp`/`PaneHandle` Data types
 ├── backend/
 │   ├── mod.rs      the HerdrBackend trait and its Opts/Created/Error types
@@ -21,6 +23,7 @@ The dependency direction is strictly one-way:
 ```
 main.rs ──▶ cli.rs
 main.rs ──▶ config.rs
+main.rs ──▶ include.rs ──▶ config.rs, validate.rs
 main.rs ──▶ engine.rs ──▶ backend/mod.rs (trait only)
 main.rs ──▶ backend/cli.rs ──implements──▶ backend/mod.rs
 ```
@@ -31,19 +34,28 @@ main.rs ──▶ backend/cli.rs ──implements──▶ backend/mod.rs
 
 ```
 config.yaml (workspaces: list, required; config.yml also accepted)
-    │  config::read_config → fs::read_to_string
-    ▼
-String (raw file contents, ownership kept by the caller)
-    │  (apply path) validate::validate_config(SourceFile { yaml, path })
-    │  → SpreadFile::from_str + validate (serde_yaml_ng)
-    │  — any finding (error or warning) stops processing (Err/exit 1);
-    │    only Ok proceeds to path resolution and the engine
-    ▼
-SpreadFile { workspaces: Vec<Workspace> }  (raw, as written by the user)
-    │  config::resolve_paths(file, env, invocation_cwd)
-    │  — resolves each workspace's root independently; every workspace gets its
-    │    own absolute root, defaulted and ~-expanded exactly as a single-workspace
-    │    config would be
+    │  include::load_flat(path, invocation_cwd, env)
+    │
+    │  per file, recursively:
+    │    fs::read_to_string                      ── Action
+    │    SpreadSource::from_str (serde_yaml_ng)   — entries are either an inline
+    │      Workspace or an `include:` naming another file or a directory
+    │    config::resolve_workspace_paths(ws, env, base)
+    │      — where `base` is the *invocation* directory for the top-level file
+    │        and the *included file's own* directory for everything it pulls in.
+    │        That difference is the whole point of includes: a repository's
+    │        layout can name no absolute paths and still resolve to itself.
+    │    include::include_candidates(raw, including_dir, env)  ── Calculation
+    │      — the paths an include might mean, in order: the path itself, then
+    │        the well-known layout file names inside it if it is a directory
+    │
+    │  cycles (an ancestor set of canonicalised paths), chains deeper than
+    │  MAX_INCLUDE_DEPTH, missing non-optional targets and per-file parse errors
+    │  all become findings naming the file at fault
+    │
+    │  validate::validate runs over the *flattened* result — which is what
+    │  catches two included files claiming one workspace name — and any finding
+    │  (error or warning) stops processing (Err/exit 1)
     ▼
 SpreadFile (every workspace's root defaulted + absolute, ~ expanded everywhere)
     │  engine::plan_file(&file)
@@ -97,6 +109,16 @@ Focus is applied per-call via the `--focus`/`--no-focus` flags herdr accepts on 
 
 **No `focus_pane` call is ever made by the engine.** The `HerdrBackend::focus_pane` trait method, the `choose_focus_strategy` helper, and the socket path plumbing still exist on `CliBackend`, but they are there for other consumers — `execute_plan` never emits a `BackendOp::FocusPane`.
 
+## `include.rs`: layouts that live in their own repository
+
+An entry in `workspaces` may be `include: <path>` instead of an inline workspace. The referenced file is an ordinary layout file, and its workspaces splice into the list at that position.
+
+The semantic that makes this worth having is the base directory. **Relative paths inside an included file resolve against that file's own directory**, not the invocation directory, so a repository's layout can contain no absolute paths and still resolve to that repository — on any machine, and in any worktree of it. The top-level file keeps resolving against the invocation directory, so existing configs are untouched. Both are the same `resolve_workspace_paths` call with a different `base`; nothing else was needed, which is why the loader is a separate module rather than a change to `config.rs`.
+
+Discovery is deliberately absent. Nothing walks up from the current directory looking for a layout file: the only files read are the ones a config names. An included file can run commands on the machine, so the config that names it is the allowlist — the same shape as `direnv`'s `allow`, decided once per repository rather than implied by a `cd`.
+
+What is refused rather than guessed at, each with the file named in the finding: cycles (checked against an ancestor set of canonicalised paths, so a symlink and a `..` spelling of one file are recognised as the same file), chains deeper than `MAX_INCLUDE_DEPTH`, a missing target that is not marked `optional: true`, and a parse error in any included file.
+
 ## `config.rs`: path resolution
 
 This is the part of the codebase that took the most iteration to get right, so it's worth understanding as its own subsystem rather than an afterthought of parsing.
@@ -128,6 +150,10 @@ config::resolve_paths(..., invocation_cwd)
 
 `query_pane_cwd` deliberately collapses every failure mode into `None` rather than propagating an error — a missing or unreachable herdr session is exactly the "standalone CLI" case the fallback exists for, not something worth failing `apply` over.
 
+### The base directory is a parameter, not a global
+
+`resolve_paths` takes the base directory rather than reading it, which is what let includes reuse it unchanged: the top-level file passes the invocation cwd, and each included file passes its own directory. If that base were resolved inside `config.rs` instead, a repository-local layout could only ever resolve against wherever the command happened to be run.
+
 ### History of the cwd/env bug
 
 This subsystem went through six rounds of review, each fixing a real bug the previous round introduced or missed. It's documented here because the same class of mistake is easy to reintroduce:
@@ -158,6 +184,8 @@ Three layers, each targeting a different seam:
 
 1. **`config.rs` unit tests** — YAML parsing and path resolution, as plain data-in/data-out assertions. No filesystem or process access beyond `read_config`'s own file read.
 2. **`engine.rs` unit tests** — split into two seams. First, pure `plan_workspace` / `plan_file` tests assert the produced `Vec<BackendOp>` directly: "for this YAML, exactly these backend operations happen, in this order, with these handles." Second, a tiny `RecordingBackend` (a hand-written `HerdrBackend` that records every call and returns canned ids) covers `execute_plan`'s id threading: it verifies that ids returned from earlier `create_*` / `split_pane` calls are fed back into later ops via the `HashMap<PaneHandle, String>` registry.
-3. **`tests/cli_backend_integration.rs`** — exercises the full `plan_file` → `execute_plan` → `CliBackend` → subprocess path, against `tests/fixtures/fake-herdr.sh`, a script that logs the argv it's called with and echoes back canned JSON shaped like real herdr responses. This catches integration bugs the plan-level tests can't see (e.g. an argv-building bug in `backend/cli.rs`). It also includes a plan-pinning test that records the exact `Vec<BackendOp>` produced for a sample file and fails if the plan ever changes unexpectedly.
+3. **`include.rs` unit tests** — each writes a small tree of real files, because reading them is the module's whole job: splice order, the base-directory rule (an included workspace's root defaults to the included file's directory, while the top-level file still follows the invocation cwd), relative includes, directory includes, `optional`, cycles, the depth cap, duplicate names across files, and a parse error naming the file it came from.
+4. **`tests/include_dry_run_integration.rs`** — drives the real binary over a multi-file layout on disk, invoked from a third directory, and asserts the printed plan is rooted inside the included repository. This is the one test that would catch `main.rs`'s wiring of the loader, which layer 5 below deliberately skips.
+5. **`tests/cli_backend_integration.rs`** — exercises the full `plan_file` → `execute_plan` → `CliBackend` → subprocess path, against `tests/fixtures/fake-herdr.sh`, a script that logs the argv it's called with and echoes back canned JSON shaped like real herdr responses. This catches integration bugs the plan-level tests can't see (e.g. an argv-building bug in `backend/cli.rs`). It also includes a plan-pinning test that records the exact `Vec<BackendOp>` produced for a sample file and fails if the plan ever changes unexpectedly.
 
-Layer 3 intentionally does *not* go through `config::resolve_paths` — it builds a `SpreadFile` directly and calls `engine::plan_file` + `engine::execute_plan` on it. `main.rs`'s wiring (config-path resolution, the `pane.get` cwd query, `resolve_paths`) is therefore covered only at the unit level, not end-to-end; keep that in mind if a bug ever turns up specifically in how `main.rs` composes those pieces rather than in any one of them.
+Layer 5 intentionally does *not* go through `config::resolve_paths` — it builds a `SpreadFile` directly and calls `engine::plan_file` + `engine::execute_plan` on it. `main.rs`'s wiring (config-path resolution, the `pane.get` cwd query, `resolve_paths`) is therefore covered only at the unit level, not end-to-end; keep that in mind if a bug ever turns up specifically in how `main.rs` composes those pieces rather than in any one of them.

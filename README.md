@@ -54,6 +54,7 @@ $ herdr-spreader apply
 - **Environment variables at every level** — set env vars for the whole workspace or scope them to a single pane.
 - **Startup commands with synchronization** — run a command in each pane, and optionally `wait_for` a pattern in its output (with a timeout) before moving on — handy for "don't run the tests until the dev server says it's ready."
 - **Explicit focus control** — mark exactly which pane should end up focused after the layout is built.
+- **Layouts that live in the repository they describe** — an entry may `include:` another layout file instead of spelling a workspace out inline, so a project's tabs and commands can sit in that project's repo while your global config stays the single entry point.
 - **Runs as a herdr plugin or a standalone CLI** — invoke it from herdr's plugin menu, or run the binary directly against any config file.
 - **Strict config validation** — unknown YAML keys are rejected at parse time instead of being silently ignored, so typos in your config surface immediately.
 - **Dry-run mode** — `--dry-run` prints the operations that *would* be performed (workspace create, tab create, pane split, run, wait…) as a human-readable plan, without invoking `herdr` or touching your session. Useful for previewing a layout before applying it, or for sanity-checking a config you just edited.
@@ -114,7 +115,7 @@ A layout file has four levels: the **file** (top level), **workspaces**, **tabs*
 
 | Key | Type | Description |
 |---|---|---|
-| `workspaces` | list of [Workspace](#workspace) (required) | Workspaces to create, in order. |
+| `workspaces` | list of [Workspace](#workspace) or [Include](#include) (required) | Workspaces to create, in order. |
 
 ### Workspace
 
@@ -125,6 +126,56 @@ A layout file has four levels: the **file** (top level), **workspaces**, **tabs*
 | `env` | map of string→string | Environment variables applied to the workspace's root pane. |
 | `tabs` | list of [Tab](#tab) | Tabs to create, in order. |
 | `focus` | boolean | Whether this workspace should be focused after creation. When `true`, the workspace is created with `--focus` (or the workspace's marked pane receives focus via `--focus` on its split/tab operation). Default: `false`. If no workspace or pane has `focus: true`, the user's current focus is preserved. |
+
+### Include
+
+Instead of an inline workspace, an entry in `workspaces` may point at another layout file:
+
+```yaml
+# ~/.config/herdr-spreader/config.yaml — the entry point, and nothing more
+workspaces:
+  - include: ~/code/my-project        # a repo: looks for .herdr-spreader.yaml inside
+  - include: ~/code/api/layout.yaml   # or name the file directly
+  - include: ~/code/occasional
+    optional: true                    # not cloned on this machine? skip it
+  - name: scratch                     # inline workspaces still work, mixed freely
+    tabs:
+      - label: notes
+        panes:
+          - command: nvim
+```
+
+```yaml
+# ~/code/my-project/.herdr-spreader.yaml — lives in the repo, names no machine
+workspaces:
+  - name: my-project
+    tabs:
+      - label: server
+        cwd: ./api          # relative to THIS file, not to wherever you ran the command
+        panes:
+          - command: just dev
+```
+
+| Key | Type | Description |
+|---|---|---|
+| `include` | path (required) | A layout file, or a directory holding one. Relative paths resolve against the directory of the file doing the including — never the invocation directory — so a checkout can move without the file changing. `~` expands to your home directory. |
+| `optional` | boolean | Skip silently when the target does not exist, instead of failing. For a repository that is not checked out on this machine. Default: `false`. |
+
+A worked pair of files is in [`examples/config-with-includes.yaml`](./examples/config-with-includes.yaml) and [`examples/repo-layout.yaml`](./examples/repo-layout.yaml).
+
+The included file is an ordinary layout file: it has its own `workspaces` list, it can include others in turn, and its workspaces are spliced into the including file's list at that position, in order.
+
+**Relative paths inside an included file resolve against that file's own directory.** A workspace with no `root` gets the directory of the file that declared it, and every relative tab/pane `cwd` layers on top of that. This is what lets a repository's layout file contain no absolute paths at all and still work on any machine, and in any worktree of that repository. The *top-level* file keeps the old behaviour — its relative paths resolve against the directory you invoked the command from — so existing configs are unaffected.
+
+Three things are refused rather than guessed at:
+
+- **Cycles.** A file that includes itself, directly or through a chain, is an error naming the loop.
+- **Chains deeper than 16 files**, as a backstop.
+- **Duplicate workspace names**, including two different repositories that both call their workspace `dev` — the layouts would be indistinguishable once built.
+
+A missing include is an error unless it is marked `optional`, and a parse error names the file it came from rather than the file you invoked.
+
+**On trust:** an included file can run commands on your machine, so treat adding an `include:` the way you would treat `direnv allow` — a deliberate, per-repository decision. Includes are never discovered by walking the filesystem; the only files read are the ones your config names, which makes that config the allowlist.
 
 ### Tab
 
@@ -155,7 +206,7 @@ Paths compose top-down: `root` → tab `cwd` → pane `cwd`, each relative overr
 
 ## How it works
 
-`herdr-spreader` doesn't call any private herdr API — it drives the same `herdr` CLI you'd use by hand, repeating steps 1-5 below for each workspace in the file, in order. Focus is not deferred to a final step; instead, when a pane is marked `focus: true`, its creation operation (`workspace create`, `tab create`, or `pane split`) is called with `--focus`, so the intended pane naturally receives focus during layout building:
+`herdr-spreader` doesn't call any private herdr API — it drives the same `herdr` CLI you'd use by hand. Any `include:` entries are expanded first, each file's paths resolved against its own directory, giving one flat list of workspaces; then steps 1-5 below run for each workspace in that list, in order. Focus is not deferred to a final step; instead, when a pane is marked `focus: true`, its creation operation (`workspace create`, `tab create`, or `pane split`) is called with `--focus`, so the intended pane naturally receives focus during layout building:
 
 1. `herdr workspace create` — creates the workspace and its first tab/pane (with `--focus` if the first pane or the workspace is marked for focus).
 2. For each subsequent tab, `herdr tab create` — creates a new tab (with `--focus` if the first pane in that tab is marked).

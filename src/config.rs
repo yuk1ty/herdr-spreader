@@ -38,6 +38,63 @@ impl SpreadFile {
     }
 }
 
+/// A reference to another layout file, in place of an inline workspace.
+///
+/// The referenced file is an ordinary layout file in its own right; its
+/// workspaces are spliced into the including file's list at this position.
+/// This is what lets a layout live in the repository whose commands it names
+/// while the global config stays the single entry point — and, because every
+/// include is written by hand into a file you own, that file doubles as the
+/// allowlist of repositories permitted to contribute commands.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Include {
+    /// Path to a layout file, or to a directory containing one. Relative paths
+    /// resolve against the directory of the file doing the including, never the
+    /// invocation directory, so a checkout can be moved without editing it.
+    pub include: PathBuf,
+    /// Skip silently when the target does not exist, instead of failing — for a
+    /// repository that is not checked out on this machine.
+    #[serde(default)]
+    pub optional: bool,
+}
+
+/// One entry in a layout file's `workspaces` list: either a workspace written
+/// out inline, or an [`Include`] pointing at another file.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum WorkspaceEntry {
+    // Include is tried first: both variants deny unknown fields, so an inline
+    // workspace cannot match Include (it has `name`) and an include cannot
+    // match Workspace (it has `include`). The order only decides which error
+    // the untagged deserializer reports for input matching neither.
+    Include(Include),
+    Inline(Box<Workspace>),
+}
+
+/// A layout file exactly as written on disk, before includes are expanded.
+///
+/// [`SpreadFile`] is the flattened result the rest of the program works with;
+/// this is the shape the YAML parser sees.
+#[derive(Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct SpreadSource {
+    pub workspaces: Vec<WorkspaceEntry>,
+}
+
+impl SpreadSource {
+    #[allow(clippy::should_implement_trait)]
+    /// Parse a [`SpreadSource`] from a YAML string.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`serde_yaml_ng::Error`] if the input is not valid YAML or does
+    /// not match the expected schema.
+    pub fn from_str(s: &str) -> Result<Self, serde_yaml_ng::Error> {
+        serde_yaml_ng::from_str(s)
+    }
+}
+
 #[derive(Debug, Default, Clone, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Tab {
@@ -92,7 +149,7 @@ pub enum ConfigError {
     },
 }
 
-const CONFIG_FILE_NAMES: &[&str] = &["config.yaml", "config.yml"];
+pub(crate) const CONFIG_FILE_NAMES: &[&str] = &["config.yaml", "config.yml"];
 
 /// Resolve the path to a config file.
 ///
@@ -169,7 +226,7 @@ pub fn resolve_paths(file: &SpreadFile, env: &BTreeMap<String, String>, cwd: &Pa
     }
 }
 
-fn resolve_workspace_paths(
+pub(crate) fn resolve_workspace_paths(
     ws: &Workspace,
     env: &BTreeMap<String, String>,
     cwd: &Path,
@@ -214,7 +271,7 @@ fn resolve_workspace_paths(
     }
 }
 
-fn expand_root_path(path: &Path, env: &BTreeMap<String, String>, cwd: &Path) -> PathBuf {
+pub(crate) fn expand_root_path(path: &Path, env: &BTreeMap<String, String>, cwd: &Path) -> PathBuf {
     let expanded = expand_tilde(path, env);
     if expanded.is_absolute() {
         expanded
@@ -223,7 +280,22 @@ fn expand_root_path(path: &Path, env: &BTreeMap<String, String>, cwd: &Path) -> 
     }
 }
 
-fn expand_tilde(path: &Path, env: &BTreeMap<String, String>) -> PathBuf {
+/// Drop `.` components from a path, leaving `..` for the shell to resolve.
+///
+/// Joining a relative path onto a base directory leaves literal `.` components
+/// behind (`/repos/./api`), which work but read as a bug in a printed plan and
+/// in a workspace's recorded root.
+pub(crate) fn normalize_path(path: &Path) -> PathBuf {
+    let mut result = PathBuf::new();
+    for component in path.components() {
+        if component != std::path::Component::CurDir {
+            result.push(component.as_os_str());
+        }
+    }
+    result
+}
+
+pub(crate) fn expand_tilde(path: &Path, env: &BTreeMap<String, String>) -> PathBuf {
     let path_str = path.to_string_lossy();
     let home = env.get("HOME").map_or("", String::as_str);
     if path_str == "~" {
@@ -262,6 +334,62 @@ workspaces:
         assert_eq!(file.workspaces.len(), 2);
         assert_eq!(file.workspaces[0].name, "frontend");
         assert_eq!(file.workspaces[1].name, "backend");
+    }
+
+    #[test]
+    fn should_parse_a_mix_of_inline_workspaces_and_includes() {
+        let yaml = r"
+workspaces:
+  - name: inline
+  - include: ~/code/api
+  - include: ./frontend
+    optional: true
+";
+
+        let source = SpreadSource::from_str(yaml).unwrap();
+
+        assert_eq!(source.workspaces.len(), 3);
+        match &source.workspaces[0] {
+            WorkspaceEntry::Inline(ws) => assert_eq!(ws.name, "inline"),
+            other @ WorkspaceEntry::Include(_) => {
+                panic!("expected an inline workspace, got {other:?}")
+            }
+        }
+        match &source.workspaces[1] {
+            WorkspaceEntry::Include(inc) => {
+                assert_eq!(inc.include, PathBuf::from("~/code/api"));
+                assert!(!inc.optional, "optional should default to false");
+            }
+            other @ WorkspaceEntry::Inline(_) => panic!("expected an include, got {other:?}"),
+        }
+        match &source.workspaces[2] {
+            WorkspaceEntry::Include(inc) => assert!(inc.optional),
+            other @ WorkspaceEntry::Inline(_) => panic!("expected an include, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn should_reject_an_entry_that_is_neither_a_workspace_nor_an_include() {
+        let yaml = r"
+workspaces:
+  - nome: typo
+";
+
+        assert!(SpreadSource::from_str(yaml).is_err());
+    }
+
+    #[test]
+    fn should_reject_an_include_carrying_workspace_keys() {
+        // Half-inline, half-include is a config the author has misunderstood;
+        // silently honouring one half would hide that.
+        let yaml = r"
+workspaces:
+  - include: ./repo
+    tabs:
+      - label: editor
+";
+
+        assert!(SpreadSource::from_str(yaml).is_err());
     }
 
     #[test]

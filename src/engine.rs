@@ -1,12 +1,12 @@
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::fmt::Write;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
 use crate::backend::{BackendError, HerdrBackend, SplitOpts, TabOpts, WorkspaceOpts};
-use crate::config::{SplitDirection, SpreadFile, WaitFor, Workspace};
+use crate::config::{SplitDirection, SpreadFile, WaitFor, Workspace, normalize_path};
 
 fn resolve_cwd(
     root: Option<&Path>,
@@ -55,16 +55,6 @@ fn wrap_command_with_cwd_and_env(
         Some(prefix) => format!("{prefix} && {command}"),
         None => command.to_string(),
     }
-}
-
-fn normalize_path(path: &Path) -> PathBuf {
-    let mut result = PathBuf::new();
-    for component in path.components() {
-        if component != Component::CurDir {
-            result.push(component.as_os_str());
-        }
-    }
-    result
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
