@@ -53,6 +53,7 @@ $ herdr-spreader apply
 - **Per-pane and per-tab working directories** — set a `root` for the whole layout and override it per tab or per pane; relative paths resolve against their parent, `~` expands to your home directory.
 - **Environment variables at every level** — set env vars for the whole workspace or scope them to a single pane.
 - **Startup commands with synchronization** — run a command in each pane, and optionally `wait_for` a pattern in its output (with a timeout) before moving on — handy for "don't run the tests until the dev server says it's ready."
+- **Idempotent re-runs** — `--on-existing skip` leaves a workspace that is already up alone, and `--on-existing sync` adds only the tabs it is missing, so applying a layout twice does not build it twice.
 - **Explicit focus control** — mark exactly which pane should end up focused after the layout is built.
 - **Runs as a herdr plugin or a standalone CLI** — invoke it from herdr's plugin menu, or run the binary directly against any config file.
 - **Strict config validation** — unknown YAML keys are rejected at parse time instead of being silently ignored, so typos in your config surface immediately.
@@ -83,6 +84,8 @@ herdr plugin action invoke herdr-spreader.apply
 
 or trigger it from herdr's action menu (`Apply layout`).
 
+The menu's `Apply layout` runs with `--on-existing sync`, because that is the action people invoke repeatedly: it adds what the layout describes and is missing, and disturbs nothing already there. `Apply layout (build a new copy)` beside it is the plain `create` behaviour, for deliberately building a second copy.
+
 ### As a standalone CLI
 
 ```bash
@@ -103,8 +106,39 @@ herdr-spreader apply [--file <path>]
 
 | Flag | Description |
 |---|---|
+| `--on-existing <create\|skip\|sync>` | What to do about a workspace whose label already exists. `create` (default) builds the layout regardless, producing a second workspace with the same label. `skip` leaves the existing one untouched and builds nothing for it. `sync` keeps it and adds only the tabs its layout describes that are not there already, matched by label. See [Re-running a layout](#re-running-a-layout). |
 | `-f, --file <path>` | Path to a layout YAML file. If omitted, searched in `$HERDR_PLUGIN_CONFIG_DIR/` (set automatically when run as a herdr plugin), then `$XDG_CONFIG_HOME/herdr-spreader/`, then `$HOME/.config/herdr-spreader/`. Each directory is checked for `config.yaml` then `config.yml`. Run `herdr plugin config-dir herdr-spreader` to see or create the plugin config directory. |
 | `--dry-run` | Print the plan of operations that would be performed (one `BackendOp` per line) without spawning `herdr` or modifying any workspace. Path resolution still runs, so the printed paths reflect your real `root`/`cwd`/`~` expansion — only execution is skipped. |
+
+## Re-running a layout
+
+By default `apply` builds what the file describes and does not look at what is already there, so running it twice gives you the layout twice. That is fine for a one-shot setup and wrong for a command you want to run whenever you sit down, or after the herdr server restarts and your panes come back as bare shells.
+
+`--on-existing` decides what happens when a workspace's `name` matches one that already exists:
+
+```bash
+herdr-spreader apply                          # create — the original behaviour
+herdr-spreader apply --on-existing skip       # already up? leave it exactly as it is
+herdr-spreader apply --on-existing sync       # already up? add only the tabs it is missing
+```
+
+`apply` reports what it did, one line per workspace, so a run that changed nothing says so instead of exiting silently:
+
+```
+  unchanged  frontend
+  updated    backend (+1 tab)
+  created    docs (3 tabs)
+```
+
+**You do not need to run this every time you sit down.** The herdr server keeps your workspaces, tabs, panes and their directories by itself, so a fresh terminal only needs `herdr` to reattach. `apply` is for when the *layout* has changed — you edited a layout file, or added a repository to the config — and for a first run on a machine. Note that a server restart brings panes back as bare shells: the tabs are still there, so `sync` considers them present and will not re-run their commands.
+
+`sync` is additive and matches tabs by label, ignoring any leading `[N] ` numbering prefix on either side. That is what lets it compose with tab-numbering plugins such as [`kokatsu/herdr-tab-numbers`](https://github.com/kokatsu/herdr-tab-numbers), which rewrite every label to `[1] name` after a layout has been applied: without it nothing matches and every tab is added a second time. You do not need to write the prefixes into your own layout. Only the `[digits]` shape is ignored, so a label of your own such as `[wip] notes` is matched as written. A tab that already exists is left untouched — panes, commands and all — because a pane may be part-way through a build and nothing here can tell. A tab with no `label` is left to a full build, since it could not be recognised on the next run and would otherwise be added again every time.
+
+Matching is on the workspace `name` against the herdr workspace label. herdr permits two workspaces with the same label; a layout cannot tell them apart, so the first one wins and any others are left alone.
+
+Under `skip` and `sync`, a workspace marked `focus: true` that already exists is focused rather than rebuilt — the workspace it names does exist, after all.
+
+Reading the server's current state costs one `workspace list`, plus one `tab list` per workspace that already exists under `sync`. The default `create` path reads nothing, which is why `--dry-run` still spawns no `herdr` process there; under `skip` and `sync` a dry run does query, so that the plan it prints is the plan that would really run.
 
 ## Configuration reference
 

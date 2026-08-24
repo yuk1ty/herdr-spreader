@@ -8,8 +8,18 @@ platforms = ["linux", "macos"]
 [[build]]
 command = ["cargo", "build", "--release"]
 
+# The menu action is the one people invoke repeatedly, so it is the idempotent
+# one: it adds whatever the layout describes and is missing, and disturbs
+# nothing that is already there. `create` remains available from the CLI, and
+# as the second action below, for deliberately building a fresh copy.
 [[actions]]
 id = "apply"
 title = "Apply layout"
+contexts = ["workspace"]
+command = ["./target/release/herdr-spreader", "apply", "--on-existing", "sync"]
+
+[[actions]]
+id = "apply-new"
+title = "Apply layout (build a new copy)"
 contexts = ["workspace"]
 command = ["./target/release/herdr-spreader", "apply"]

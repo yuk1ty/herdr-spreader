@@ -35,6 +35,21 @@ pub struct TabCreated {
     pub root_pane_id: String,
 }
 
+/// A workspace that already exists on the server.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkspaceSummary {
+    pub workspace_id: String,
+    /// Herdr allows an unlabelled workspace, which can never match a layout.
+    pub label: Option<String>,
+}
+
+/// A tab that already exists inside a workspace.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TabSummary {
+    pub tab_id: String,
+    pub label: Option<String>,
+}
+
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct SplitOpts {
     pub direction: SplitDirection,
@@ -98,6 +113,27 @@ pub trait HerdrBackend {
     ///
     /// Returns [`BackendError`] if the underlying command fails.
     fn wait_output(&mut self, pane_id: &str, wait: &WaitFor) -> Result<(), BackendError>;
+
+    /// List the workspaces that already exist on the server.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BackendError`] if the underlying command fails.
+    fn list_workspaces(&mut self) -> Result<Vec<WorkspaceSummary>, BackendError>;
+
+    /// List the tabs of an existing workspace.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BackendError`] if the underlying command fails.
+    fn list_tabs(&mut self, workspace_id: &str) -> Result<Vec<TabSummary>, BackendError>;
+
+    /// Focus an existing workspace.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BackendError`] if the underlying command fails.
+    fn focus_workspace(&mut self, workspace_id: &str) -> Result<(), BackendError>;
 
     /// Focus the given pane.
     ///

@@ -14,7 +14,11 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Apply { file, dry_run } => {
+        Command::Apply {
+            file,
+            dry_run,
+            on_existing,
+        } => {
             let config_path = resolve_config_path(file, &env)?;
             let contents = read_config(&config_path)?;
             let spread_file = match validate::validate_config(validate::SourceFile {
@@ -41,15 +45,31 @@ fn main() -> anyhow::Result<()> {
             };
             let spread_file = resolve_paths(&spread_file, &env, &cwd);
 
+            let on_existing = engine::OnExisting::from(on_existing);
+
             if dry_run {
-                let plan = engine::plan_file(&spread_file);
+                // Reading the server state is what makes a dry run under
+                // `--on-existing skip`/`sync` show the plan that would really
+                // run. Under the default it reads nothing, so a dry run still
+                // spawns no herdr process at all.
+                let state = engine::read_existing_state(&spread_file, on_existing, &mut backend)?;
+                let plan = engine::plan_file_with_state(&spread_file, &state, on_existing);
                 for op in &plan {
                     println!("{}", engine::render_op(op));
                 }
                 return Ok(());
             }
 
-            engine::apply(&spread_file, &mut backend)?;
+            // Report before running, so a long-running layout says what it is
+            // about to do rather than going quiet; the summary is derived from
+            // the same plan that then executes, so it cannot disagree with it.
+            let state = engine::read_existing_state(&spread_file, on_existing, &mut backend)?;
+            for line in engine::summarize(&spread_file, &state, on_existing) {
+                println!("{}", line.render());
+            }
+
+            let plan = engine::plan_file_with_state(&spread_file, &state, on_existing);
+            engine::execute_plan(&plan, &mut backend)?;
 
             Ok(())
         }

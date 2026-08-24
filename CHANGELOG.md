@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `apply` now reports what it did, one line per workspace
+  (`created` / `updated (+N tabs)` / `unchanged` / `skipped`). Previously it
+  printed nothing at all, which under `--on-existing sync` is indistinguishable
+  from having failed.
+- The plugin's `Apply layout` menu action now runs `--on-existing sync`, with a
+  second `Apply layout (build a new copy)` action for the previous behaviour.
+- `--on-existing <create|skip|sync>`, making a re-run idempotent. `skip` leaves a
+  workspace whose label already exists untouched; `sync` keeps it and adds only
+  the tabs it is missing, matched by label, without disturbing the ones already
+  there. The default stays `create`, the previous build-regardless behaviour.
+
+### Fixed
+
+- `--on-existing sync` now ignores a leading `[N] ` numbering prefix when
+  matching tab labels, so it composes with tab-numbering plugins such as
+  [`kokatsu/herdr-tab-numbers`](https://github.com/kokatsu/herdr-tab-numbers).
+  Previously that plugin's renaming made every tab look missing and a re-run
+  duplicated all of them. Reported by @amiel.
+
 ## [0.2.1](https://github.com/yuk1ty/herdr-spreader/compare/v0.2.0...v0.2.1) - 2026-08-16
 
 ### Fixed

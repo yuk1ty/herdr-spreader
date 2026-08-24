@@ -9,7 +9,7 @@ src/
 ├── main.rs        thin CLI entry point: wires config → engine → backend together
 ├── cli.rs         clap argument parsing (`apply --file <path>`)
 ├── config.rs       YAML → SpreadFile (a list of Workspaces), plus all path resolution (root/cwd/tilde)
-├── engine.rs       pure plan logic (`plan_workspace`, `plan_file` — Calculations) + `execute_plan` Action + `BackendOp`/`PaneHandle` Data types
+├── engine.rs       pure plan logic (`plan_workspace`, `plan_file`, `summarize` — Calculations) + `execute_plan`/`read_existing_state` Actions + `BackendOp`/`PaneHandle`/`ExistingState`/`OnExisting` Data types
 ├── backend/
 │   ├── mod.rs      the HerdrBackend trait and its Opts/Created/Error types
 │   └── cli.rs      CliBackend: HerdrBackend implemented by spawning the herdr binary
@@ -46,14 +46,28 @@ SpreadFile { workspaces: Vec<Workspace> }  (raw, as written by the user)
     │    config would be
     ▼
 SpreadFile (every workspace's root defaulted + absolute, ~ expanded everywhere)
-    │  engine::plan_file(&file)
+    │  engine::read_existing_state(&file, on_existing, backend)  ── Action
+    │  — `workspace list`, plus `tab list` per workspace the file names that
+    │    already exists. Reads nothing at all under OnExisting::Create, which is
+    │    why the default path still spawns no herdr process for a dry run
+    ▼
+ExistingState { workspaces, tabs }
+    │  engine::plan_file_with_state(&file, &state, on_existing)  ── Calculation
+    │  — Create builds everything; Skip emits nothing for a workspace that
+    │    exists; Sync binds it with UseWorkspace and adds only the tabs whose
+    │    labels are absent
     ▼
 Vec<BackendOp> — one flat plan for the whole file
-    │  engine::execute_plan(plan, &mut backend)
+    │  engine::summarize(&file, &state, on_existing)  ── Calculation
+    │  — the per-workspace report, classified from the very operations planned,
+    │    so it cannot claim something the run does not do
+    │  engine::execute_plan(plan, &mut backend)  ── Action
     ▼
 walk the plan in order; each `create_*` / `split_pane` returns an id that is
 threaded into a `HashMap<PaneHandle, String>` registry, so later ops can refer
-to earlier-created workspaces, tabs, and panes by their stable handles
+to earlier-created workspaces, tabs, and panes by their stable handles.
+`UseWorkspace` binds an id that already exists into the same registry, which is
+how a synced tab lands in the right workspace
     ▼
 an actual set of herdr workspaces, with tabs, panes, commands, and focused panes
 ```
@@ -96,6 +110,35 @@ Focus is applied per-call via the `--focus`/`--no-focus` flags herdr accepts on 
 - `SplitPane` passes `--focus` when the pane being split off has `focus: true`; otherwise `--no-focus`.
 
 **No `focus_pane` call is ever made by the engine.** The `HerdrBackend::focus_pane` trait method, the `choose_focus_strategy` helper, and the socket path plumbing still exist on `CliBackend`, but they are there for other consumers — `execute_plan` never emits a `BackendOp::FocusPane`.
+
+## `engine.rs`: planning against what already exists
+
+`apply` originally began, unconditionally, with `herdr workspace create`. That made a second run build the layout a second time, which is fine for a one-shot setup and wrong for a command you run whenever you sit down. `--on-existing` decides what happens when a workspace's `name` matches a label already on the server:
+
+- `Create` (default) — build regardless, duplicating. The behaviour every existing config relies on.
+- `Skip` — emit nothing for that workspace.
+- `Sync` — bind it and add only the tabs whose labels are absent.
+
+The split between reading and deciding is deliberate and load-bearing:
+
+- **`read_existing_state`** is the only Action. It costs one `workspace list`, plus one `tab list` per workspace the file names that already exists — and nothing at all under `Create`.
+- **`plan_workspace_with_state`** is a Calculation over `(layout, ExistingState, OnExisting)`.
+
+Because deciding is pure, `--dry-run` prints exactly the plan that would run under `Skip`/`Sync`, and under `Create` it still spawns no herdr process — the promise the README makes.
+
+Two operations exist only for this:
+
+- **`UseWorkspace`** binds a workspace id that already exists, so the `CreateTab` operations after it target it. Without it the executor's `workspace_id` could only ever come from a `CreateWorkspace`.
+- **`FocusWorkspace`** focuses one that already exists — the counterpart, for a workspace that is not being built, of the `--focus` flag a created one would carry. Without it a `focus: true` on an existing workspace would silently do nothing.
+
+Three rules in `plan_sync_workspace` are decisions, not oversights:
+
+- **An existing tab is never touched** — not its panes, not its commands. A pane may be part-way through a build and nothing here can tell.
+- **Labels are compared with any leading `[N] ` numbering prefix stripped** (`tab_label_key`). Tab-numbering plugins rewrite every label to `[1] name` after a layout has been applied, and strip the same prefix before re-adding it; comparing the raw strings finds nothing, decides every tab is missing, and duplicates the lot — the exact failure `--on-existing` exists to prevent. Only `[digits]` is stripped, so a user's own `[wip] notes` keeps its identity.
+- **An unlabelled tab is skipped.** It could not be recognised on the next run, so syncing it would add another copy every time.
+- **The first tab is created like any other.** In a fresh build, tab 0 is the pane that came back from `workspace create` and therefore carries the *workspace* cwd, which is why its command is prefixed with a `cd` (see [why "first panes" are special-cased](#enginers-why-first-panes-are-special-cased)). A synced tab is created by `tab create --cwd`, so it needs no prefix — hence the `root_from_workspace_create` flag threaded into `plan_tab_panes` rather than a bare `tab_index == 0` test.
+
+`summarize` classifies each workspace from the operations planned for it, rather than from the layout or from watching the run. That is what keeps the printed report (`created` / `updated (+N tabs)` / `unchanged` / `skipped`) honest: it is derived from the same plan that executes.
 
 ## `config.rs`: path resolution
 
@@ -143,11 +186,11 @@ If you're touching path resolution, add a test for the *specific* combination yo
 
 ## `backend/`: the seam between logic and I/O
 
-`backend/mod.rs` defines `HerdrBackend` — one method per herdr operation the engine needs (`create_workspace`, `create_tab`, `split_pane`, `run`, `wait_output`, `focus_pane`, `rename_tab`), plus the `*Opts`/`*Created` structs passed to and returned from them. This trait is the entire contract between "what layout to build" (`engine.rs`) and "how to actually build it" (`backend/cli.rs`).
+`backend/mod.rs` defines `HerdrBackend` — one method per herdr operation the engine needs (`create_workspace`, `create_tab`, `split_pane`, `run`, `wait_output`, `focus_pane`, `rename_tab`, and the three that let a plan account for what is already there: `list_workspaces`, `list_tabs`, `focus_workspace`), plus the `*Opts`/`*Created`/`*Summary` structs passed to and returned from them. This trait is the entire contract between "what layout to build" (`engine.rs`) and "how to actually build it" (`backend/cli.rs`).
 
 `backend/cli.rs` implements that trait by shelling out to the `herdr` binary and parsing its JSON stdout. Internally it's split into two halves on purpose:
 
-- **Pure functions** (`workspace_create_args`, `tab_create_args`, `pane_split_args`, `pane_run_args`, `wait_output_args`, `focus_args`, `rename_tab_args`, `pane_get_args`, `choose_focus_strategy`, and the matching `parse_*` functions) — no I/O, just `Opts → Vec<String>`, `Option<&str> → FocusStrategy`, and `&str (JSON) → Result<T, BackendError>`. These are unit-tested directly, without spawning anything.
+- **Pure functions** (`workspace_create_args`, `tab_create_args`, `pane_split_args`, `pane_run_args`, `wait_output_args`, `focus_args`, `rename_tab_args`, `pane_get_args`, `workspace_list_args`, `tab_list_args`, `workspace_focus_args`, `choose_focus_strategy`, and the matching `parse_*` functions) — no I/O, just `Opts → Vec<String>`, `Option<&str> → FocusStrategy`, and `&str (JSON) → Result<T, BackendError>`. These are unit-tested directly, without spawning anything.
 - **`CliBackend`** itself — the thin `impl HerdrBackend` that calls those pure functions and then actually runs `std::process::Command`. It's spawned via an argv array (`Command::args`, never a shell string), so there's no shell-injection surface at the herdr-invocation boundary — the only place shell syntax appears is inside the *pane's own command string*, which is sent to that pane's interactive shell via `herdr pane run`, exactly as if the user had typed it themselves.
 
 `CliBackend::resolve_bin` picks the `herdr` binary to spawn: `$HERDR_BIN_PATH` if set (mainly for tests), otherwise `herdr` on `$PATH`.
@@ -157,7 +200,7 @@ If you're touching path resolution, add a test for the *specific* combination yo
 Three layers, each targeting a different seam:
 
 1. **`config.rs` unit tests** — YAML parsing and path resolution, as plain data-in/data-out assertions. No filesystem or process access beyond `read_config`'s own file read.
-2. **`engine.rs` unit tests** — split into two seams. First, pure `plan_workspace` / `plan_file` tests assert the produced `Vec<BackendOp>` directly: "for this YAML, exactly these backend operations happen, in this order, with these handles." Second, a tiny `RecordingBackend` (a hand-written `HerdrBackend` that records every call and returns canned ids) covers `execute_plan`'s id threading: it verifies that ids returned from earlier `create_*` / `split_pane` calls are fed back into later ops via the `HashMap<PaneHandle, String>` registry.
+2. **`engine.rs` unit tests** — split into two seams. First, pure `plan_workspace` / `plan_file` tests assert the produced `Vec<BackendOp>` directly: "for this YAML, exactly these backend operations happen, in this order, with these handles." Second, a tiny `RecordingBackend` (a hand-written `HerdrBackend` that records every call, returns canned ids, and reports back whatever existing workspaces and tabs a test gives it) covers `execute_plan`'s id threading, and the `read_existing_state` → `apply_with_policy` path: it verifies that ids returned from earlier `create_*` / `split_pane` calls are fed back into later ops via the `HashMap<PaneHandle, String>` registry.
 3. **`tests/cli_backend_integration.rs`** — exercises the full `plan_file` → `execute_plan` → `CliBackend` → subprocess path, against `tests/fixtures/fake-herdr.sh`, a script that logs the argv it's called with and echoes back canned JSON shaped like real herdr responses. This catches integration bugs the plan-level tests can't see (e.g. an argv-building bug in `backend/cli.rs`). It also includes a plan-pinning test that records the exact `Vec<BackendOp>` produced for a sample file and fails if the plan ever changes unexpectedly.
 
 Layer 3 intentionally does *not* go through `config::resolve_paths` — it builds a `SpreadFile` directly and calls `engine::plan_file` + `engine::execute_plan` on it. `main.rs`'s wiring (config-path resolution, the `pane.get` cwd query, `resolve_paths`) is therefore covered only at the unit level, not end-to-end; keep that in mind if a bug ever turns up specifically in how `main.rs` composes those pieces rather than in any one of them.

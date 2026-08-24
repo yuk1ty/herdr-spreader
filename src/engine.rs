@@ -5,8 +5,10 @@ use std::path::{Component, Path, PathBuf};
 
 use thiserror::Error;
 
-use crate::backend::{BackendError, HerdrBackend, SplitOpts, TabOpts, WorkspaceOpts};
-use crate::config::{SplitDirection, SpreadFile, WaitFor, Workspace};
+use crate::backend::{
+    BackendError, HerdrBackend, SplitOpts, TabOpts, TabSummary, WorkspaceOpts, WorkspaceSummary,
+};
+use crate::config::{SplitDirection, SpreadFile, Tab, WaitFor, Workspace};
 
 fn resolve_cwd(
     root: Option<&Path>,
@@ -67,6 +69,94 @@ fn normalize_path(path: &Path) -> PathBuf {
     result
 }
 
+/// What to do about a workspace whose label already exists on the server.
+///
+/// The default is [`OnExisting::Create`], which is what this tool has always
+/// done: build the layout unconditionally, duplicating anything already there.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum OnExisting {
+    /// Build the layout regardless, producing a second workspace with the same
+    /// label.
+    #[default]
+    Create,
+    /// Leave an existing workspace exactly as it is, and build nothing for it.
+    Skip,
+    /// Keep an existing workspace and add only the tabs its layout describes
+    /// that are not there already, matched by label.
+    Sync,
+}
+
+/// The server state a plan is made against: which workspaces exist, and which
+/// tabs each of them has.
+///
+/// Reading this is an Action, done once before planning; planning against it is
+/// a Calculation, which is what keeps `--dry-run` able to print exactly the
+/// plan that would run.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct ExistingState {
+    pub workspaces: Vec<WorkspaceSummary>,
+    /// Tabs per workspace id. Absent means "not looked up", which for planning
+    /// purposes is the same as a workspace with no tabs this layout knows.
+    pub tabs: HashMap<String, Vec<TabSummary>>,
+}
+
+impl ExistingState {
+    /// The id of the first existing workspace carrying `label`.
+    ///
+    /// Herdr permits two workspaces with the same label; a layout cannot tell
+    /// them apart, so the first one wins and the rest are left alone.
+    #[must_use]
+    pub fn workspace_id(&self, label: &str) -> Option<&str> {
+        self.workspaces
+            .iter()
+            .find(|w| w.label.as_deref() == Some(label))
+            .map(|w| w.workspace_id.as_str())
+    }
+
+    /// Whether `workspace_id` already has a tab labelled `label`.
+    ///
+    /// Compared through [`tab_label_key`], so a tab another plugin has
+    /// renumbered still recognises itself.
+    #[must_use]
+    pub fn has_tab(&self, workspace_id: &str, label: &str) -> bool {
+        let wanted = tab_label_key(label);
+        self.tabs.get(workspace_id).is_some_and(|tabs| {
+            tabs.iter().any(|t| {
+                t.label
+                    .as_deref()
+                    .is_some_and(|l| tab_label_key(l) == wanted)
+            })
+        })
+    }
+}
+
+/// A tab label with any leading `[N]` numbering prefix removed.
+///
+/// Tab-numbering plugins such as
+/// [`kokatsu/herdr-tab-numbers`](https://github.com/kokatsu/herdr-tab-numbers)
+/// rewrite every tab label to `[1] name` after a layout has been applied, and
+/// strip that same prefix before re-adding it. Comparing labels with the prefix
+/// off is what lets `sync` recognise its own tabs once such a plugin has
+/// renamed them: matching the raw strings finds nothing, decides every tab is
+/// missing, and adds a second copy of each — the exact duplication
+/// `--on-existing` exists to prevent.
+///
+/// Only the `[digits]` shape is stripped, so an ordinary label that merely
+/// starts with a bracket (`[wip] notes`) is left alone.
+fn tab_label_key(label: &str) -> &str {
+    let Some(rest) = label.strip_prefix('[') else {
+        return label;
+    };
+    let Some(close) = rest.find(']') else {
+        return label;
+    };
+    let (digits, after) = rest.split_at(close);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return label;
+    }
+    after[']'.len_utf8()..].trim_start()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PaneHandle {
     TabRoot(usize),
@@ -76,6 +166,16 @@ pub enum PaneHandle {
 #[derive(Debug, Clone, PartialEq)]
 pub enum BackendOp {
     CreateWorkspace(WorkspaceOpts),
+    /// Continue into a workspace that already exists, instead of creating one.
+    /// Binds the workspace id the following `CreateTab` operations target.
+    UseWorkspace {
+        workspace_id: String,
+    },
+    /// Focus a workspace that already exists — the counterpart, for a skipped
+    /// or synced workspace, of the `--focus` flag a created one would carry.
+    FocusWorkspace {
+        workspace_id: String,
+    },
     RenameFirstTab {
         label: String,
     },
@@ -133,6 +233,14 @@ pub fn execute_plan(plan: &[BackendOp], backend: &mut dyn HerdrBackend) -> Resul
                 ex.tab0_id = Some(c.tab_id);
                 ex.panes.insert(PaneHandle::TabRoot(0), c.root_pane_id);
             }
+            BackendOp::UseWorkspace { workspace_id } => {
+                ex.workspace_id = Some(workspace_id.clone());
+                // No tab came with it, so there is no first tab to rename.
+                ex.tab0_id = None;
+            }
+            BackendOp::FocusWorkspace { workspace_id } => {
+                backend.focus_workspace(workspace_id)?;
+            }
             BackendOp::RenameFirstTab { label } => {
                 backend.rename_tab(
                     ex.tab0_id
@@ -184,11 +292,66 @@ pub fn execute_plan(plan: &[BackendOp], backend: &mut dyn HerdrBackend) -> Resul
 ///
 /// Returns [`EngineError::Backend`] if any backend operation fails.
 pub fn apply(file: &SpreadFile, backend: &mut dyn HerdrBackend) -> Result<(), EngineError> {
-    execute_plan(&plan_file(file), backend)
+    apply_with_policy(file, OnExisting::Create, backend)
+}
+
+/// Apply a file, deciding what to do about workspaces that already exist.
+///
+/// # Errors
+///
+/// Returns [`EngineError::Backend`] if reading the server state or any
+/// operation fails.
+pub fn apply_with_policy(
+    file: &SpreadFile,
+    on_existing: OnExisting,
+    backend: &mut dyn HerdrBackend,
+) -> Result<(), EngineError> {
+    let state = read_existing_state(file, on_existing, backend)?;
+    execute_plan(&plan_file_with_state(file, &state, on_existing), backend)
 }
 
 #[must_use]
 pub fn plan_workspace(ws: &Workspace) -> Vec<BackendOp> {
+    plan_workspace_with_state(ws, &ExistingState::default(), OnExisting::Create)
+}
+
+/// Plan one workspace against what already exists on the server.
+///
+/// A Calculation: given the layout, the server's current shape and the chosen
+/// policy, it returns the operations to run. Nothing here performs I/O, which
+/// is what lets `--dry-run` print the plan that would actually run.
+#[must_use]
+pub fn plan_workspace_with_state(
+    ws: &Workspace,
+    state: &ExistingState,
+    on_existing: OnExisting,
+) -> Vec<BackendOp> {
+    let existing = match on_existing {
+        OnExisting::Create => None,
+        OnExisting::Skip | OnExisting::Sync => state.workspace_id(&ws.name),
+    };
+
+    match (on_existing, existing) {
+        // Nothing there yet (or the caller asked for the old behaviour): build
+        // the whole layout, exactly as before.
+        (OnExisting::Create, _) | (_, None) => plan_new_workspace(ws),
+        // Already there: leave every pane of it alone. A layout that asks for
+        // focus still gets it — the workspace it names does exist, after all.
+        (OnExisting::Skip, Some(id)) => {
+            if ws.focus {
+                vec![BackendOp::FocusWorkspace {
+                    workspace_id: id.to_string(),
+                }]
+            } else {
+                Vec::new()
+            }
+        }
+        (OnExisting::Sync, Some(id)) => plan_sync_workspace(ws, state, id),
+    }
+}
+
+/// The whole layout, built from nothing.
+fn plan_new_workspace(ws: &Workspace) -> Vec<BackendOp> {
     let first_pane_focus = ws
         .tabs
         .first()
@@ -206,94 +369,318 @@ pub fn plan_workspace(ws: &Workspace) -> Vec<BackendOp> {
     let mut next_split = 1usize;
 
     for (tab_index, tab) in ws.tabs.iter().enumerate() {
-        let root_handle = PaneHandle::TabRoot(tab_index);
-
         if tab_index == 0 {
+            // The workspace already came with a tab and a pane; name it rather
+            // than leaving an unnamed stray beside a tab we would create.
             if let Some(label) = &tab.label {
                 ops.push(BackendOp::RenameFirstTab {
                     label: label.clone(),
                 });
             }
         } else {
-            let first_pane_focus = tab.panes.first().is_some_and(|p| p.focus);
             ops.push(BackendOp::CreateTab {
                 index: tab_index,
                 opts: TabOpts {
                     label: tab.label.clone(),
                     cwd: resolve_cwd(ws.root.as_deref(), tab.cwd.as_deref(), None),
-                    focus: first_pane_focus,
+                    focus: tab.panes.first().is_some_and(|p| p.focus),
                 },
             });
         }
 
-        let mut previous_handle = root_handle;
-
-        for (pane_index, pane) in tab.panes.iter().enumerate() {
-            let pane_handle = if pane_index == 0 {
-                previous_handle.clone()
-            } else {
-                let new_handle = PaneHandle::Split(next_split);
-                next_split += 1;
-                ops.push(BackendOp::SplitPane {
-                    from: previous_handle.clone(),
-                    into: new_handle.clone(),
-                    opts: SplitOpts {
-                        direction: pane.split,
-                        ratio: pane.ratio,
-                        cwd: resolve_cwd(
-                            ws.root.as_deref(),
-                            tab.cwd.as_deref(),
-                            pane.cwd.as_deref(),
-                        ),
-                        env: pane.env.clone(),
-                        focus: pane.focus,
-                    },
-                });
-                new_handle
-            };
-
-            let needs_cwd_override = pane.cwd.is_some() || (tab_index == 0 && tab.cwd.is_some());
-            let resolved_cwd = if pane_index == 0 && needs_cwd_override {
-                resolve_cwd(ws.root.as_deref(), tab.cwd.as_deref(), pane.cwd.as_deref())
-            } else {
-                None
-            };
-
-            if let Some(command) = &pane.command {
-                let command_to_run = if pane_index == 0 {
-                    wrap_command_with_cwd_and_env(command, resolved_cwd.as_deref(), &pane.env)
-                } else {
-                    command.clone()
-                };
-                ops.push(BackendOp::Run {
-                    pane: pane_handle.clone(),
-                    command: command_to_run,
-                });
-                if let Some(wait_for) = &pane.wait_for {
-                    ops.push(BackendOp::WaitOutput {
-                        pane: pane_handle.clone(),
-                        wait: wait_for.clone(),
-                    });
-                }
-            } else if pane_index == 0
-                && let Some(prefix) = cwd_env_prefix(resolved_cwd.as_deref(), &pane.env)
-            {
-                ops.push(BackendOp::Run {
-                    pane: pane_handle.clone(),
-                    command: prefix,
-                });
-            }
-
-            previous_handle = pane_handle;
-        }
+        plan_tab_panes(
+            ws,
+            tab,
+            tab_index,
+            tab_index == 0,
+            &mut next_split,
+            &mut ops,
+        );
     }
 
     ops
 }
 
+/// Only what the existing workspace is missing.
+///
+/// Additive by design: tabs are matched by label and the ones already there are
+/// left untouched, panes and all. A pane in an existing tab may be part-way
+/// through a build; nothing here can tell, so nothing here disturbs it.
+fn plan_sync_workspace(
+    ws: &Workspace,
+    state: &ExistingState,
+    workspace_id: &str,
+) -> Vec<BackendOp> {
+    let mut ops = vec![BackendOp::UseWorkspace {
+        workspace_id: workspace_id.to_string(),
+    }];
+
+    if ws.focus {
+        // Emitted before the tab creations so that a pane marked `focus: true`
+        // in one of the new tabs still wins, matching how focus resolves when
+        // the whole workspace is built at once.
+        ops.push(BackendOp::FocusWorkspace {
+            workspace_id: workspace_id.to_string(),
+        });
+    }
+
+    let mut next_split = 1usize;
+
+    for (tab_index, tab) in ws.tabs.iter().enumerate() {
+        // An unlabelled tab cannot be recognised on a later run, so syncing it
+        // would add another copy every time. Leave it to a full build.
+        let Some(label) = tab.label.as_ref() else {
+            continue;
+        };
+        if state.has_tab(workspace_id, label) {
+            continue;
+        }
+
+        ops.push(BackendOp::CreateTab {
+            index: tab_index,
+            opts: TabOpts {
+                label: Some(label.clone()),
+                cwd: resolve_cwd(ws.root.as_deref(), tab.cwd.as_deref(), None),
+                focus: tab.panes.first().is_some_and(|p| p.focus),
+            },
+        });
+
+        // Unlike a fresh build, even tab 0 is created here rather than inherited
+        // from `workspace create`, so its root pane already carries the tab cwd
+        // and needs no `cd` prefix.
+        plan_tab_panes(ws, tab, tab_index, false, &mut next_split, &mut ops);
+    }
+
+    ops
+}
+
+/// Panes within one tab: the splits, the commands, and the waits.
+///
+/// `root_from_workspace_create` marks the one case where the tab's first pane
+/// was not created with a cwd of its own — the first tab of a freshly created
+/// workspace, whose pane came from `workspace create` and so carries the
+/// *workspace* cwd. That pane, and only that pane, needs its command prefixed
+/// with a `cd`.
+fn plan_tab_panes(
+    ws: &Workspace,
+    tab: &Tab,
+    tab_index: usize,
+    root_from_workspace_create: bool,
+    next_split: &mut usize,
+    ops: &mut Vec<BackendOp>,
+) {
+    let mut previous_handle = PaneHandle::TabRoot(tab_index);
+
+    for (pane_index, pane) in tab.panes.iter().enumerate() {
+        let pane_handle = if pane_index == 0 {
+            previous_handle.clone()
+        } else {
+            let new_handle = PaneHandle::Split(*next_split);
+            *next_split += 1;
+            ops.push(BackendOp::SplitPane {
+                from: previous_handle.clone(),
+                into: new_handle.clone(),
+                opts: SplitOpts {
+                    direction: pane.split,
+                    ratio: pane.ratio,
+                    cwd: resolve_cwd(ws.root.as_deref(), tab.cwd.as_deref(), pane.cwd.as_deref()),
+                    env: pane.env.clone(),
+                    focus: pane.focus,
+                },
+            });
+            new_handle
+        };
+
+        let needs_cwd_override =
+            pane.cwd.is_some() || (root_from_workspace_create && tab.cwd.is_some());
+        let resolved_cwd = if pane_index == 0 && needs_cwd_override {
+            resolve_cwd(ws.root.as_deref(), tab.cwd.as_deref(), pane.cwd.as_deref())
+        } else {
+            None
+        };
+
+        if let Some(command) = &pane.command {
+            let command_to_run = if pane_index == 0 {
+                wrap_command_with_cwd_and_env(command, resolved_cwd.as_deref(), &pane.env)
+            } else {
+                command.clone()
+            };
+            ops.push(BackendOp::Run {
+                pane: pane_handle.clone(),
+                command: command_to_run,
+            });
+            if let Some(wait_for) = &pane.wait_for {
+                ops.push(BackendOp::WaitOutput {
+                    pane: pane_handle.clone(),
+                    wait: wait_for.clone(),
+                });
+            }
+        } else if pane_index == 0
+            && let Some(prefix) = cwd_env_prefix(resolved_cwd.as_deref(), &pane.env)
+        {
+            ops.push(BackendOp::Run {
+                pane: pane_handle.clone(),
+                command: prefix,
+            });
+        }
+
+        previous_handle = pane_handle;
+    }
+}
+
 #[must_use]
 pub fn plan_file(file: &SpreadFile) -> Vec<BackendOp> {
-    file.workspaces.iter().flat_map(plan_workspace).collect()
+    plan_file_with_state(file, &ExistingState::default(), OnExisting::Create)
+}
+
+/// What `apply` did to one workspace, for reporting back to the person who ran it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Outcome {
+    /// Built from nothing, with this many tabs.
+    Created(usize),
+    /// Already existed; this many tabs were added to it.
+    Synced(usize),
+    /// Already existed and matched the layout; nothing was done.
+    Unchanged,
+    /// Already existed and was deliberately left alone.
+    Skipped,
+}
+
+/// One line of the report: a workspace and what happened to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceOutcome {
+    pub name: String,
+    pub outcome: Outcome,
+}
+
+impl WorkspaceOutcome {
+    /// The one-line form printed after an apply.
+    #[must_use]
+    pub fn render(&self) -> String {
+        match self.outcome {
+            Outcome::Created(tabs) => {
+                format!("  created    {} ({})", self.name, plural(tabs, "tab"))
+            }
+            Outcome::Synced(added) => {
+                format!("  updated    {} (+{})", self.name, plural(added, "tab"))
+            }
+            Outcome::Unchanged => format!("  unchanged  {}", self.name),
+            Outcome::Skipped => format!("  skipped    {} (already up)", self.name),
+        }
+    }
+}
+
+fn plural(n: usize, noun: &str) -> String {
+    if n == 1 {
+        format!("{n} {noun}")
+    } else {
+        format!("{n} {noun}s")
+    }
+}
+
+/// Describe what a plan will do (or did), workspace by workspace.
+///
+/// A Calculation over the same inputs the planner takes, so the report can be
+/// produced without watching the run — and cannot drift from it, because it is
+/// derived from the very operations that run.
+#[must_use]
+pub fn summarize(
+    file: &SpreadFile,
+    state: &ExistingState,
+    on_existing: OnExisting,
+) -> Vec<WorkspaceOutcome> {
+    file.workspaces
+        .iter()
+        .map(|ws| {
+            let ops = plan_workspace_with_state(ws, state, on_existing);
+            let created_tabs = ops
+                .iter()
+                .filter(|op| {
+                    matches!(
+                        op,
+                        BackendOp::CreateTab { .. } | BackendOp::RenameFirstTab { .. }
+                    )
+                })
+                .count();
+            let outcome = if ops
+                .iter()
+                .any(|op| matches!(op, BackendOp::CreateWorkspace(_)))
+            {
+                // A workspace whose first tab carries no label gets no
+                // RenameFirstTab, so count the layout rather than the ops.
+                Outcome::Created(ws.tabs.len())
+            } else if ops
+                .iter()
+                .any(|op| matches!(op, BackendOp::UseWorkspace { .. }))
+            {
+                if created_tabs == 0 {
+                    Outcome::Unchanged
+                } else {
+                    Outcome::Synced(created_tabs)
+                }
+            } else {
+                Outcome::Skipped
+            };
+            WorkspaceOutcome {
+                name: ws.name.clone(),
+                outcome,
+            }
+        })
+        .collect()
+}
+
+/// Plan every workspace in a file against what already exists on the server.
+#[must_use]
+pub fn plan_file_with_state(
+    file: &SpreadFile,
+    state: &ExistingState,
+    on_existing: OnExisting,
+) -> Vec<BackendOp> {
+    file.workspaces
+        .iter()
+        .flat_map(|ws| plan_workspace_with_state(ws, state, on_existing))
+        .collect()
+}
+
+/// Read the server state a plan needs: the workspaces that exist, and the tabs
+/// of the ones this file names.
+///
+/// The Action half of idempotence. Only the workspaces the layout mentions are
+/// looked up, so the cost is one `workspace list` plus one `tab list` per
+/// workspace that already exists — and none at all under [`OnExisting::Create`],
+/// which is why that path still spawns no herdr process for a dry run.
+///
+/// # Errors
+///
+/// Returns [`EngineError::Backend`] if the backend cannot be queried.
+pub fn read_existing_state(
+    file: &SpreadFile,
+    on_existing: OnExisting,
+    backend: &mut dyn HerdrBackend,
+) -> Result<ExistingState, EngineError> {
+    if on_existing == OnExisting::Create {
+        return Ok(ExistingState::default());
+    }
+
+    let workspaces = backend.list_workspaces()?;
+    let mut state = ExistingState {
+        workspaces,
+        tabs: HashMap::new(),
+    };
+
+    if on_existing == OnExisting::Sync {
+        let ids: Vec<String> = file
+            .workspaces
+            .iter()
+            .filter_map(|ws| state.workspace_id(&ws.name).map(ToString::to_string))
+            .collect();
+        for id in ids {
+            let tabs = backend.list_tabs(&id)?;
+            state.tabs.insert(id, tabs);
+        }
+    }
+
+    Ok(state)
 }
 
 #[must_use]
@@ -313,6 +700,12 @@ pub fn render_op(op: &BackendOp) -> String {
             } else {
                 " --no-focus"
             });
+        }
+        BackendOp::UseWorkspace { workspace_id } => {
+            write!(s, "workspace use {workspace_id} (already exists)").unwrap();
+        }
+        BackendOp::FocusWorkspace { workspace_id } => {
+            write!(s, "workspace focus {workspace_id}").unwrap();
         }
         BackendOp::RenameFirstTab { label } => {
             write!(s, "tab rename --label {}", shell_quote(label)).unwrap();
@@ -384,15 +777,19 @@ mod tests {
     use std::path::PathBuf;
 
     use crate::backend::{
-        BackendError, HerdrBackend, SplitOpts, TabCreated, TabOpts, WorkspaceCreated, WorkspaceOpts,
+        BackendError, HerdrBackend, SplitOpts, TabCreated, TabOpts, TabSummary, WorkspaceCreated,
+        WorkspaceOpts, WorkspaceSummary,
     };
     use crate::config::{Pane, SplitDirection, SpreadFile, Tab, WaitFor, Workspace};
-    use crate::engine;
+    use crate::engine::{self, BackendOp};
 
     #[derive(Default)]
     struct RecordingBackend {
         log: Vec<String>,
         next_pane: u32,
+        /// Server state the backend reports back, for the idempotence paths.
+        existing_workspaces: Vec<WorkspaceSummary>,
+        existing_tabs: Vec<TabSummary>,
     }
 
     impl HerdrBackend for RecordingBackend {
@@ -452,6 +849,21 @@ mod tests {
         fn wait_output(&mut self, pane_id: &str, wait: &WaitFor) -> Result<(), BackendError> {
             self.log
                 .push(format!("wait_output {pane_id} pattern={}", wait.pattern));
+            Ok(())
+        }
+
+        fn list_workspaces(&mut self) -> Result<Vec<WorkspaceSummary>, BackendError> {
+            self.log.push("list_workspaces".to_string());
+            Ok(self.existing_workspaces.clone())
+        }
+
+        fn list_tabs(&mut self, workspace_id: &str) -> Result<Vec<TabSummary>, BackendError> {
+            self.log.push(format!("list_tabs {workspace_id}"));
+            Ok(self.existing_tabs.clone())
+        }
+
+        fn focus_workspace(&mut self, workspace_id: &str) -> Result<(), BackendError> {
+            self.log.push(format!("focus_workspace {workspace_id}"));
             Ok(())
         }
 
@@ -1793,5 +2205,464 @@ mod tests {
                 "tab rename --label 'it'\\''s ok'"
             );
         }
+    }
+
+    fn workspace_named(name: &str) -> Workspace {
+        Workspace {
+            name: name.to_string(),
+            root: Some(PathBuf::from("/repo")),
+            tabs: vec![
+                Tab {
+                    label: Some("editor".to_string()),
+                    cwd: None,
+                    panes: vec![Pane {
+                        command: Some("nvim".to_string()),
+                        ..Pane::default()
+                    }],
+                },
+                Tab {
+                    label: Some("server".to_string()),
+                    cwd: None,
+                    panes: vec![Pane {
+                        command: Some("cargo run".to_string()),
+                        ..Pane::default()
+                    }],
+                },
+            ],
+            ..Workspace::default()
+        }
+    }
+
+    fn state_with(label: &str, id: &str, tabs: &[&str]) -> engine::ExistingState {
+        let mut state = engine::ExistingState {
+            workspaces: vec![WorkspaceSummary {
+                workspace_id: id.to_string(),
+                label: Some(label.to_string()),
+            }],
+            ..engine::ExistingState::default()
+        };
+        state.tabs.insert(
+            id.to_string(),
+            tabs.iter()
+                .map(|t| TabSummary {
+                    tab_id: format!("{id}:{t}"),
+                    label: Some((*t).to_string()),
+                })
+                .collect(),
+        );
+        state
+    }
+
+    #[test]
+    fn should_plan_the_whole_workspace_when_nothing_with_that_label_exists() {
+        let ws = workspace_named("demo");
+        let state = state_with("something-else", "wA", &[]);
+
+        for mode in [engine::OnExisting::Skip, engine::OnExisting::Sync] {
+            let plan = engine::plan_workspace_with_state(&ws, &state, mode);
+            assert!(
+                matches!(plan.first(), Some(BackendOp::CreateWorkspace(_))),
+                "{mode:?} should build from scratch, got {plan:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn should_duplicate_an_existing_workspace_under_the_default_policy() {
+        // The behaviour every existing config relies on, kept as the default.
+        let ws = workspace_named("demo");
+        let state = state_with("demo", "wA", &["editor", "server"]);
+
+        let plan = engine::plan_workspace_with_state(&ws, &state, engine::OnExisting::Create);
+
+        assert!(matches!(plan.first(), Some(BackendOp::CreateWorkspace(_))));
+    }
+
+    #[test]
+    fn should_plan_nothing_for_an_existing_workspace_under_skip() {
+        let ws = workspace_named("demo");
+        let state = state_with("demo", "wA", &["editor"]);
+
+        let plan = engine::plan_workspace_with_state(&ws, &state, engine::OnExisting::Skip);
+
+        assert!(plan.is_empty(), "expected no operations, got {plan:?}");
+    }
+
+    #[test]
+    fn should_focus_an_existing_workspace_under_skip_when_the_layout_asks_for_focus() {
+        let mut ws = workspace_named("demo");
+        ws.focus = true;
+        let state = state_with("demo", "wA", &["editor"]);
+
+        let plan = engine::plan_workspace_with_state(&ws, &state, engine::OnExisting::Skip);
+
+        assert_eq!(
+            plan,
+            vec![BackendOp::FocusWorkspace {
+                workspace_id: "wA".to_string()
+            }]
+        );
+    }
+
+    #[test]
+    fn should_add_only_the_missing_tabs_under_sync() {
+        let ws = workspace_named("demo");
+        let state = state_with("demo", "wA", &["editor"]);
+
+        let plan = engine::plan_workspace_with_state(&ws, &state, engine::OnExisting::Sync);
+
+        assert_eq!(
+            plan[0],
+            BackendOp::UseWorkspace {
+                workspace_id: "wA".to_string()
+            }
+        );
+        assert!(
+            !plan
+                .iter()
+                .any(|op| matches!(op, BackendOp::CreateWorkspace(_))),
+            "sync must never create a second workspace: {plan:?}"
+        );
+        let created: Vec<&str> = plan
+            .iter()
+            .filter_map(|op| match op {
+                BackendOp::CreateTab { opts, .. } => opts.label.as_deref(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(created, vec!["server"], "only the missing tab");
+        assert!(
+            plan.iter().any(|op| matches!(
+                op,
+                BackendOp::Run { command, .. } if command == "cargo run"
+            )),
+            "the new tab's command should still run: {plan:?}"
+        );
+        assert!(
+            !plan.iter().any(|op| matches!(
+                op,
+                BackendOp::Run { command, .. } if command == "nvim"
+            )),
+            "an existing tab's command must not be re-run: {plan:?}"
+        );
+    }
+
+    #[test]
+    fn should_plan_only_the_binding_under_sync_when_every_tab_already_exists() {
+        let ws = workspace_named("demo");
+        let state = state_with("demo", "wA", &["editor", "server"]);
+
+        let plan = engine::plan_workspace_with_state(&ws, &state, engine::OnExisting::Sync);
+
+        assert_eq!(
+            plan,
+            vec![BackendOp::UseWorkspace {
+                workspace_id: "wA".to_string()
+            }]
+        );
+    }
+
+    #[test]
+    fn should_recognise_tabs_a_numbering_plugin_has_renamed() {
+        // `kokatsu/herdr-tab-numbers` rewrites every label to `[N] name` after
+        // a layout is applied. Matching raw strings finds nothing and adds a
+        // second copy of every tab, which is what `--on-existing` exists to
+        // prevent.
+        let ws = workspace_named("demo");
+        let state = state_with("demo", "wA", &["[1] editor", "[2] server"]);
+
+        let plan = engine::plan_workspace_with_state(&ws, &state, engine::OnExisting::Sync);
+
+        assert_eq!(
+            plan,
+            vec![BackendOp::UseWorkspace {
+                workspace_id: "wA".to_string()
+            }],
+            "a renumbered tab is still the same tab: {plan:?}"
+        );
+    }
+
+    #[test]
+    fn should_recognise_a_renumbered_tab_when_the_layout_carries_a_number_too() {
+        // The workaround for the bug above was to hand-write the prefixes into
+        // the layout. That has to keep working, including when the plugin has
+        // since renumbered the tab to a different index.
+        let mut ws = workspace_named("demo");
+        ws.tabs[0].label = Some("[1] editor".to_string());
+        ws.tabs[1].label = Some("[2] server".to_string());
+        let state = state_with("demo", "wA", &["[3] editor", "[4] server"]);
+
+        let plan = engine::plan_workspace_with_state(&ws, &state, engine::OnExisting::Sync);
+
+        assert_eq!(
+            plan,
+            vec![BackendOp::UseWorkspace {
+                workspace_id: "wA".to_string()
+            }],
+            "the index is not part of the identity: {plan:?}"
+        );
+    }
+
+    #[test]
+    fn should_not_strip_a_bracketed_prefix_that_is_not_a_number() {
+        // Only the `[digits]` shape is a numbering prefix. `[wip] editor` is
+        // somebody's actual label and must not be conflated with `editor`.
+        let ws = workspace_named("demo");
+        let state = state_with("demo", "wA", &["[wip] editor", "server"]);
+
+        let plan = engine::plan_workspace_with_state(&ws, &state, engine::OnExisting::Sync);
+
+        let created: Vec<&str> = plan
+            .iter()
+            .filter_map(|op| match op {
+                BackendOp::CreateTab { opts, .. } => opts.label.as_deref(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(created, vec!["editor"], "got {plan:?}");
+    }
+
+    #[test]
+    fn should_leave_an_unlabelled_tab_alone_under_sync() {
+        // It could not be recognised on the next run, so syncing it would add
+        // another copy every time.
+        let mut ws = workspace_named("demo");
+        ws.tabs.push(Tab {
+            label: None,
+            cwd: None,
+            panes: vec![Pane {
+                command: Some("htop".to_string()),
+                ..Pane::default()
+            }],
+        });
+        let state = state_with("demo", "wA", &["editor", "server"]);
+
+        let plan = engine::plan_workspace_with_state(&ws, &state, engine::OnExisting::Sync);
+
+        assert!(
+            !plan.iter().any(|op| matches!(
+                op,
+                BackendOp::Run { command, .. } if command == "htop"
+            )),
+            "unlabelled tab should be skipped: {plan:?}"
+        );
+    }
+
+    #[test]
+    fn should_give_a_synced_tabs_first_pane_its_own_cwd_without_a_cd_prefix() {
+        // A tab created by `tab create` carries --cwd already; only the first
+        // tab of a freshly created workspace inherits the workspace cwd and
+        // needs the prefix.
+        let ws = Workspace {
+            name: "demo".to_string(),
+            root: Some(PathBuf::from("/repo")),
+            tabs: vec![Tab {
+                label: Some("api".to_string()),
+                cwd: Some(PathBuf::from("./api")),
+                panes: vec![Pane {
+                    command: Some("just dev".to_string()),
+                    ..Pane::default()
+                }],
+            }],
+            ..Workspace::default()
+        };
+        let state = state_with("demo", "wA", &[]);
+
+        let synced = engine::plan_workspace_with_state(&ws, &state, engine::OnExisting::Sync);
+        let fresh = engine::plan_workspace_with_state(
+            &ws,
+            &engine::ExistingState::default(),
+            engine::OnExisting::Create,
+        );
+
+        let run_of = |plan: &[BackendOp]| {
+            plan.iter()
+                .find_map(|op| match op {
+                    BackendOp::Run { command, .. } => Some(command.clone()),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        assert_eq!(run_of(&synced), "just dev");
+        assert_eq!(run_of(&fresh), "cd '/repo/api' && just dev");
+    }
+
+    #[test]
+    fn should_read_no_server_state_at_all_under_the_default_policy() {
+        let file = SpreadFile {
+            workspaces: vec![workspace_named("demo")],
+        };
+        let mut backend = RecordingBackend::default();
+
+        engine::read_existing_state(&file, engine::OnExisting::Create, &mut backend).unwrap();
+
+        assert!(
+            backend.log.is_empty(),
+            "the default path must not query herdr: {:?}",
+            backend.log
+        );
+    }
+
+    #[test]
+    fn should_read_tabs_only_for_workspaces_that_already_exist() {
+        let file = SpreadFile {
+            workspaces: vec![workspace_named("demo"), workspace_named("absent")],
+        };
+        let mut backend = RecordingBackend {
+            existing_workspaces: vec![WorkspaceSummary {
+                workspace_id: "wA".to_string(),
+                label: Some("demo".to_string()),
+            }],
+            ..RecordingBackend::default()
+        };
+
+        let state =
+            engine::read_existing_state(&file, engine::OnExisting::Sync, &mut backend).unwrap();
+
+        assert_eq!(backend.log, vec!["list_workspaces", "list_tabs wA"]);
+        assert_eq!(state.workspace_id("demo"), Some("wA"));
+        assert_eq!(state.workspace_id("absent"), None);
+    }
+
+    #[test]
+    fn should_apply_sync_end_to_end_without_creating_a_second_workspace() {
+        let file = SpreadFile {
+            workspaces: vec![workspace_named("demo")],
+        };
+        let mut backend = RecordingBackend {
+            existing_workspaces: vec![WorkspaceSummary {
+                workspace_id: "wA".to_string(),
+                label: Some("demo".to_string()),
+            }],
+            existing_tabs: vec![TabSummary {
+                tab_id: "wA:t1".to_string(),
+                label: Some("editor".to_string()),
+            }],
+            ..RecordingBackend::default()
+        };
+
+        engine::apply_with_policy(&file, engine::OnExisting::Sync, &mut backend).unwrap();
+
+        assert!(
+            !backend
+                .log
+                .iter()
+                .any(|l| l.starts_with("create_workspace")),
+            "no workspace should have been created: {:?}",
+            backend.log
+        );
+        assert!(
+            backend.log.iter().any(|l| l.contains("create_tab")),
+            "the missing tab should have been created: {:?}",
+            backend.log
+        );
+    }
+
+    #[test]
+    fn should_match_the_first_of_two_workspaces_sharing_a_label() {
+        // herdr allows duplicate labels; a layout cannot tell them apart, so
+        // the first wins and the rest are left alone.
+        let state = engine::ExistingState {
+            workspaces: vec![
+                WorkspaceSummary {
+                    workspace_id: "wA".to_string(),
+                    label: Some("demo".to_string()),
+                },
+                WorkspaceSummary {
+                    workspace_id: "wB".to_string(),
+                    label: Some("demo".to_string()),
+                },
+            ],
+            ..engine::ExistingState::default()
+        };
+
+        assert_eq!(state.workspace_id("demo"), Some("wA"));
+    }
+
+    #[test]
+    fn should_ignore_an_unlabelled_existing_workspace_when_matching() {
+        let state = engine::ExistingState {
+            workspaces: vec![WorkspaceSummary {
+                workspace_id: "wA".to_string(),
+                label: None,
+            }],
+            ..engine::ExistingState::default()
+        };
+
+        assert_eq!(state.workspace_id("demo"), None);
+    }
+
+    #[test]
+    fn should_report_what_happened_to_each_workspace() {
+        let file = SpreadFile {
+            workspaces: vec![
+                workspace_named("already-current"),
+                workspace_named("needs-a-tab"),
+                workspace_named("brand-new"),
+            ],
+        };
+        let mut state = state_with("already-current", "wA", &["editor", "server"]);
+        state.workspaces.push(WorkspaceSummary {
+            workspace_id: "wB".to_string(),
+            label: Some("needs-a-tab".to_string()),
+        });
+        state.tabs.insert(
+            "wB".to_string(),
+            vec![TabSummary {
+                tab_id: "wB:t1".to_string(),
+                label: Some("editor".to_string()),
+            }],
+        );
+
+        let report = engine::summarize(&file, &state, engine::OnExisting::Sync);
+
+        assert_eq!(
+            report.iter().map(|o| o.outcome.clone()).collect::<Vec<_>>(),
+            vec![
+                engine::Outcome::Unchanged,
+                engine::Outcome::Synced(1),
+                engine::Outcome::Created(2),
+            ]
+        );
+    }
+
+    #[test]
+    fn should_report_an_existing_workspace_as_skipped_under_skip() {
+        let file = SpreadFile {
+            workspaces: vec![workspace_named("demo")],
+        };
+        let state = state_with("demo", "wA", &["editor"]);
+
+        let report = engine::summarize(&file, &state, engine::OnExisting::Skip);
+
+        assert_eq!(report[0].outcome, engine::Outcome::Skipped);
+        assert!(report[0].render().contains("skipped"));
+    }
+
+    #[test]
+    fn should_report_every_workspace_as_created_under_the_default_policy() {
+        let file = SpreadFile {
+            workspaces: vec![workspace_named("demo")],
+        };
+        let state = state_with("demo", "wA", &["editor", "server"]);
+
+        let report = engine::summarize(&file, &state, engine::OnExisting::Create);
+
+        assert_eq!(report[0].outcome, engine::Outcome::Created(2));
+    }
+
+    #[test]
+    fn should_render_singular_and_plural_tab_counts() {
+        let one = engine::WorkspaceOutcome {
+            name: "demo".to_string(),
+            outcome: engine::Outcome::Synced(1),
+        };
+        let many = engine::WorkspaceOutcome {
+            name: "demo".to_string(),
+            outcome: engine::Outcome::Created(3),
+        };
+
+        assert!(one.render().contains("+1 tab)"), "{}", one.render());
+        assert!(many.render().contains("(3 tabs)"), "{}", many.render());
     }
 }
