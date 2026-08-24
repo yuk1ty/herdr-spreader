@@ -20,6 +20,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the tabs it is missing, matched by label, without disturbing the ones already
   there. The default stays `create`, the previous build-regardless behaviour.
 
+### Fixed
+
+- `--on-existing sync` now ignores a leading `[N] ` numbering prefix when
+  matching tab labels, so it composes with tab-numbering plugins such as
+  [`kokatsu/herdr-tab-numbers`](https://github.com/kokatsu/herdr-tab-numbers).
+  Previously that plugin's renaming made every tab look missing and a re-run
+  duplicated all of them. Reported by @amiel.
+
 ## [0.2.1](https://github.com/yuk1ty/herdr-spreader/compare/v0.2.0...v0.2.1) - 2026-08-16
 
 ### Fixed

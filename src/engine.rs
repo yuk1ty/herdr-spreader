@@ -114,12 +114,47 @@ impl ExistingState {
     }
 
     /// Whether `workspace_id` already has a tab labelled `label`.
+    ///
+    /// Compared through [`tab_label_key`], so a tab another plugin has
+    /// renumbered still recognises itself.
     #[must_use]
     pub fn has_tab(&self, workspace_id: &str, label: &str) -> bool {
-        self.tabs
-            .get(workspace_id)
-            .is_some_and(|tabs| tabs.iter().any(|t| t.label.as_deref() == Some(label)))
+        let wanted = tab_label_key(label);
+        self.tabs.get(workspace_id).is_some_and(|tabs| {
+            tabs.iter().any(|t| {
+                t.label
+                    .as_deref()
+                    .is_some_and(|l| tab_label_key(l) == wanted)
+            })
+        })
     }
+}
+
+/// A tab label with any leading `[N]` numbering prefix removed.
+///
+/// Tab-numbering plugins such as
+/// [`kokatsu/herdr-tab-numbers`](https://github.com/kokatsu/herdr-tab-numbers)
+/// rewrite every tab label to `[1] name` after a layout has been applied, and
+/// strip that same prefix before re-adding it. Comparing labels with the prefix
+/// off is what lets `sync` recognise its own tabs once such a plugin has
+/// renamed them: matching the raw strings finds nothing, decides every tab is
+/// missing, and adds a second copy of each — the exact duplication
+/// `--on-existing` exists to prevent.
+///
+/// Only the `[digits]` shape is stripped, so an ordinary label that merely
+/// starts with a bracket (`[wip] notes`) is left alone.
+fn tab_label_key(label: &str) -> &str {
+    let Some(rest) = label.strip_prefix('[') else {
+        return label;
+    };
+    let Some(close) = rest.find(']') else {
+        return label;
+    };
+    let (digits, after) = rest.split_at(close);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return label;
+    }
+    after[']'.len_utf8()..].trim_start()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -2325,6 +2360,66 @@ mod tests {
                 workspace_id: "wA".to_string()
             }]
         );
+    }
+
+    #[test]
+    fn should_recognise_tabs_a_numbering_plugin_has_renamed() {
+        // `kokatsu/herdr-tab-numbers` rewrites every label to `[N] name` after
+        // a layout is applied. Matching raw strings finds nothing and adds a
+        // second copy of every tab, which is what `--on-existing` exists to
+        // prevent.
+        let ws = workspace_named("demo");
+        let state = state_with("demo", "wA", &["[1] editor", "[2] server"]);
+
+        let plan = engine::plan_workspace_with_state(&ws, &state, engine::OnExisting::Sync);
+
+        assert_eq!(
+            plan,
+            vec![BackendOp::UseWorkspace {
+                workspace_id: "wA".to_string()
+            }],
+            "a renumbered tab is still the same tab: {plan:?}"
+        );
+    }
+
+    #[test]
+    fn should_recognise_a_renumbered_tab_when_the_layout_carries_a_number_too() {
+        // The workaround for the bug above was to hand-write the prefixes into
+        // the layout. That has to keep working, including when the plugin has
+        // since renumbered the tab to a different index.
+        let mut ws = workspace_named("demo");
+        ws.tabs[0].label = Some("[1] editor".to_string());
+        ws.tabs[1].label = Some("[2] server".to_string());
+        let state = state_with("demo", "wA", &["[3] editor", "[4] server"]);
+
+        let plan = engine::plan_workspace_with_state(&ws, &state, engine::OnExisting::Sync);
+
+        assert_eq!(
+            plan,
+            vec![BackendOp::UseWorkspace {
+                workspace_id: "wA".to_string()
+            }],
+            "the index is not part of the identity: {plan:?}"
+        );
+    }
+
+    #[test]
+    fn should_not_strip_a_bracketed_prefix_that_is_not_a_number() {
+        // Only the `[digits]` shape is a numbering prefix. `[wip] editor` is
+        // somebody's actual label and must not be conflated with `editor`.
+        let ws = workspace_named("demo");
+        let state = state_with("demo", "wA", &["[wip] editor", "server"]);
+
+        let plan = engine::plan_workspace_with_state(&ws, &state, engine::OnExisting::Sync);
+
+        let created: Vec<&str> = plan
+            .iter()
+            .filter_map(|op| match op {
+                BackendOp::CreateTab { opts, .. } => opts.label.as_deref(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(created, vec!["editor"], "got {plan:?}");
     }
 
     #[test]

@@ -134,6 +134,7 @@ Two operations exist only for this:
 Three rules in `plan_sync_workspace` are decisions, not oversights:
 
 - **An existing tab is never touched** — not its panes, not its commands. A pane may be part-way through a build and nothing here can tell.
+- **Labels are compared with any leading `[N] ` numbering prefix stripped** (`tab_label_key`). Tab-numbering plugins rewrite every label to `[1] name` after a layout has been applied, and strip the same prefix before re-adding it; comparing the raw strings finds nothing, decides every tab is missing, and duplicates the lot — the exact failure `--on-existing` exists to prevent. Only `[digits]` is stripped, so a user's own `[wip] notes` keeps its identity.
 - **An unlabelled tab is skipped.** It could not be recognised on the next run, so syncing it would add another copy every time.
 - **The first tab is created like any other.** In a fresh build, tab 0 is the pane that came back from `workspace create` and therefore carries the *workspace* cwd, which is why its command is prefixed with a `cd` (see [why "first panes" are special-cased](#enginers-why-first-panes-are-special-cased)). A synced tab is created by `tab create --cwd`, so it needs no prefix — hence the `root_from_workspace_create` flag threaded into `plan_tab_panes` rather than a bare `tab_index == 0` test.
 
