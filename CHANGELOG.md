@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- *(config)* accept `split: auto` and resolve it from the previous pane's size at apply time
+- *(config)* accept `split: auto` and resolve it from the previous pane's cell rect, using tty cell pixels when available
 
 ## [0.2.1](https://github.com/yuk1ty/herdr-spreader/compare/v0.2.0...v0.2.1) - 2026-08-16
 

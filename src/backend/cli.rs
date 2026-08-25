@@ -7,7 +7,7 @@ use serde::Deserialize;
 use super::{
     BackendError, HerdrBackend, SplitOpts, TabCreated, TabOpts, WorkspaceCreated, WorkspaceOpts,
 };
-use crate::config::{SplitDirection, WaitFor};
+use crate::config::{SplitDirection, WaitFor, cell_metrics};
 
 pub(crate) fn workspace_create_args(opts: &WorkspaceOpts) -> Vec<String> {
     let mut args = vec!["workspace".to_string(), "create".to_string()];
@@ -358,12 +358,48 @@ impl CliBackend {
             return Ok(opts.clone());
         }
         let stdout = self.exec(&pane_layout_args(from_pane))?;
-        let (width, height) = parse_pane_size(&stdout, from_pane)?;
+        let (cols, rows) = parse_pane_size(&stdout, from_pane)?;
         Ok(SplitOpts {
-            direction: SplitDirection::for_size(width, height),
+            direction: SplitDirection::Auto.for_pane(cols, rows, query_tty_cell_metrics()),
             ..opts.clone()
         })
     }
+}
+
+#[cfg(unix)]
+fn query_tty_cell_metrics() -> Option<crate::config::CellMetrics> {
+    use std::fs::File;
+    use std::os::fd::AsRawFd;
+
+    let file = File::open("/dev/tty").ok()?;
+    let mut ws = libc::winsize {
+        ws_row: 0,
+        ws_col: 0,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // SAFETY: `ws` is a local winsize and the fd is an open tty.
+    let rc = unsafe {
+        libc::ioctl(
+            file.as_raw_fd(),
+            libc::TIOCGWINSZ,
+            std::ptr::addr_of_mut!(ws),
+        )
+    };
+    if rc != 0 {
+        return None;
+    }
+    cell_metrics(
+        u64::from(ws.ws_col),
+        u64::from(ws.ws_row),
+        u64::from(ws.ws_xpixel),
+        u64::from(ws.ws_ypixel),
+    )
+}
+
+#[cfg(not(unix))]
+fn query_tty_cell_metrics() -> Option<crate::config::CellMetrics> {
+    None
 }
 
 /// Send a `pane.focus` JSON-RPC request over the herdr Unix socket to focus a
