@@ -74,12 +74,13 @@ pub enum SplitDirection {
 }
 
 impl SplitDirection {
-    /// Choose a concrete split from the previous pane's size.
+    /// Choose a concrete split from the previous pane's cell size.
     ///
-    /// A tall pane (`height > width`) splits down; otherwise it splits right.
+    /// Terminal cells are typically about twice as tall as they are wide, so
+    /// a pane is treated as tall when `width < 2 * height`.
     #[must_use]
     pub fn for_size(width: u64, height: u64) -> Self {
-        if height > width {
+        if width < height.saturating_mul(2) {
             Self::Down
         } else {
             Self::Right
@@ -412,8 +413,10 @@ workspaces:
     #[test]
     fn should_split_tall_pane_down_and_wide_pane_right() {
         assert_eq!(SplitDirection::for_size(80, 120), SplitDirection::Down);
+        assert_eq!(SplitDirection::for_size(122, 82), SplitDirection::Down);
         assert_eq!(SplitDirection::for_size(160, 40), SplitDirection::Right);
-        assert_eq!(SplitDirection::for_size(80, 80), SplitDirection::Right);
+        assert_eq!(SplitDirection::for_size(180, 50), SplitDirection::Right);
+        assert_eq!(SplitDirection::for_size(80, 80), SplitDirection::Down);
     }
 
     #[test]
