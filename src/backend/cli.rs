@@ -7,7 +7,7 @@ use serde::Deserialize;
 use super::{
     BackendError, HerdrBackend, SplitOpts, TabCreated, TabOpts, WorkspaceCreated, WorkspaceOpts,
 };
-use crate::config::{SplitDirection, WaitFor};
+use crate::config::{SplitDirection, WaitFor, cell_metrics};
 
 pub(crate) fn workspace_create_args(opts: &WorkspaceOpts) -> Vec<String> {
     let mut args = vec!["workspace".to_string(), "create".to_string()];
@@ -35,13 +35,16 @@ pub(crate) fn tab_create_args(workspace_id: &str, opts: &TabOpts) -> Vec<String>
     args
 }
 
-pub(crate) fn pane_split_args(from_pane: &str, opts: &SplitOpts) -> Vec<String> {
+pub(crate) fn pane_split_args(
+    from_pane: &str,
+    opts: &SplitOpts,
+) -> Result<Vec<String>, BackendError> {
     let mut args = vec![
         "pane".to_string(),
         "split".to_string(),
         from_pane.to_string(),
         "--direction".to_string(),
-        direction_str(opts.direction).to_string(),
+        direction_str(opts.direction)?.to_string(),
     ];
     if let Some(ratio) = opts.ratio {
         args.push("--ratio".to_string());
@@ -50,7 +53,16 @@ pub(crate) fn pane_split_args(from_pane: &str, opts: &SplitOpts) -> Vec<String> 
     push_cwd(&mut args, opts.cwd.as_ref());
     push_env(&mut args, &opts.env);
     push_focus_flag(&mut args, opts.focus);
-    args
+    Ok(args)
+}
+
+pub(crate) fn pane_layout_args(pane_id: &str) -> Vec<String> {
+    vec![
+        "pane".to_string(),
+        "layout".to_string(),
+        "--pane".to_string(),
+        pane_id.to_string(),
+    ]
 }
 
 pub(crate) fn pane_run_args(pane_id: &str, command: &str) -> Vec<String> {
@@ -97,10 +109,13 @@ pub(crate) fn rename_tab_args(tab_id: &str, label: &str) -> Vec<String> {
     ]
 }
 
-fn direction_str(direction: SplitDirection) -> &'static str {
+fn direction_str(direction: SplitDirection) -> Result<&'static str, BackendError> {
     match direction {
-        SplitDirection::Right => "right",
-        SplitDirection::Down => "down",
+        SplitDirection::Right => Ok("right"),
+        SplitDirection::Down => Ok("down"),
+        SplitDirection::Auto => Err(BackendError::Herdr {
+            message: "auto split must be resolved before pane split".to_string(),
+        }),
     }
 }
 
@@ -206,6 +221,42 @@ pub(crate) fn parse_pane_split(json: &str) -> Result<String, BackendError> {
     Ok(body.pane.pane_id)
 }
 
+#[derive(Debug, Deserialize)]
+struct LayoutBody {
+    layout: LayoutInfo,
+}
+
+#[derive(Debug, Deserialize)]
+struct LayoutInfo {
+    area: LayoutRect,
+    #[serde(default)]
+    panes: Vec<LayoutPane>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LayoutPane {
+    pane_id: String,
+    rect: LayoutRect,
+}
+
+#[derive(Debug, Deserialize)]
+struct LayoutRect {
+    width: u64,
+    height: u64,
+}
+
+pub(crate) fn parse_pane_size(json: &str, pane_id: &str) -> Result<(u64, u64), BackendError> {
+    let body: LayoutBody = parse_envelope(json)?;
+    Ok(body
+        .layout
+        .panes
+        .iter()
+        .find(|pane| pane.pane_id == pane_id)
+        .map_or((body.layout.area.width, body.layout.area.height), |pane| {
+            (pane.rect.width, pane.rect.height)
+        }))
+}
+
 pub(crate) fn pane_get_args(pane_id: &str) -> Vec<String> {
     vec!["pane".to_string(), "get".to_string(), pane_id.to_string()]
 }
@@ -297,6 +348,58 @@ impl CliBackend {
         let stdout = self.exec(&pane_get_args(pane_id)).ok()?;
         parse_pane_cwd(&stdout).ok().flatten()
     }
+
+    fn resolve_split_opts(
+        &self,
+        from_pane: &str,
+        opts: &SplitOpts,
+    ) -> Result<SplitOpts, BackendError> {
+        if opts.direction != SplitDirection::Auto {
+            return Ok(opts.clone());
+        }
+        let stdout = self.exec(&pane_layout_args(from_pane))?;
+        let (cols, rows) = parse_pane_size(&stdout, from_pane)?;
+        Ok(SplitOpts {
+            direction: SplitDirection::Auto.for_pane(cols, rows, query_tty_cell_metrics()),
+            ..opts.clone()
+        })
+    }
+}
+
+#[cfg(unix)]
+fn query_tty_cell_metrics() -> Option<crate::config::CellMetrics> {
+    use std::fs::File;
+    use std::os::fd::AsRawFd;
+
+    let file = File::open("/dev/tty").ok()?;
+    let mut ws = libc::winsize {
+        ws_row: 0,
+        ws_col: 0,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // SAFETY: `ws` is a local winsize and the fd is an open tty.
+    let rc = unsafe {
+        libc::ioctl(
+            file.as_raw_fd(),
+            libc::TIOCGWINSZ,
+            std::ptr::addr_of_mut!(ws),
+        )
+    };
+    if rc != 0 {
+        return None;
+    }
+    cell_metrics(
+        u64::from(ws.ws_col),
+        u64::from(ws.ws_row),
+        u64::from(ws.ws_xpixel),
+        u64::from(ws.ws_ypixel),
+    )
+}
+
+#[cfg(not(unix))]
+fn query_tty_cell_metrics() -> Option<crate::config::CellMetrics> {
+    None
 }
 
 /// Send a `pane.focus` JSON-RPC request over the herdr Unix socket to focus a
@@ -396,7 +499,8 @@ impl HerdrBackend for CliBackend {
     }
 
     fn split_pane(&mut self, from_pane: &str, opts: &SplitOpts) -> Result<String, BackendError> {
-        let stdout = self.exec(&pane_split_args(from_pane, opts))?;
+        let opts = self.resolve_split_opts(from_pane, opts)?;
+        let stdout = self.exec(&pane_split_args(from_pane, &opts)?)?;
         parse_pane_split(&stdout)
     }
 
@@ -496,7 +600,7 @@ mod tests {
             focus: false,
         };
 
-        let args = pane_split_args("wA:p1", &opts);
+        let args = pane_split_args("wA:p1", &opts).unwrap();
 
         assert_eq!(
             args,
@@ -511,6 +615,56 @@ mod tests {
                 "--no-focus"
             ]
         );
+    }
+
+    #[test]
+    fn should_reject_unresolved_auto_split_in_herdr_argv() {
+        let opts = SplitOpts {
+            direction: SplitDirection::Auto,
+            ..Default::default()
+        };
+
+        let err = pane_split_args("wA:p1", &opts).unwrap_err();
+
+        assert!(err.to_string().contains("auto split"));
+    }
+
+    #[test]
+    fn should_build_pane_layout_argv() {
+        assert_eq!(
+            pane_layout_args("wA:p1"),
+            vec!["pane", "layout", "--pane", "wA:p1"]
+        );
+    }
+
+    #[test]
+    fn should_parse_pane_size_from_matching_rect() {
+        let json = r#"{
+            "result": {
+                "layout": {
+                    "area": { "width": 160, "height": 80 },
+                    "panes": [
+                        { "pane_id": "wA:p1", "rect": { "width": 80, "height": 120 } }
+                    ]
+                }
+            }
+        }"#;
+
+        assert_eq!(parse_pane_size(json, "wA:p1").unwrap(), (80, 120));
+    }
+
+    #[test]
+    fn should_fall_back_to_layout_area_when_pane_is_missing() {
+        let json = r#"{
+            "result": {
+                "layout": {
+                    "area": { "width": 160, "height": 80 },
+                    "panes": []
+                }
+            }
+        }"#;
+
+        assert_eq!(parse_pane_size(json, "wA:p1").unwrap(), (160, 80));
     }
 
     #[test]

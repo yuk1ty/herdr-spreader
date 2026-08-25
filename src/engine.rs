@@ -375,6 +375,7 @@ fn direction_str(d: SplitDirection) -> &'static str {
     match d {
         SplitDirection::Right => "right",
         SplitDirection::Down => "down",
+        SplitDirection::Auto => "auto",
     }
 }
 
@@ -774,6 +775,58 @@ mod tests {
                     BackendOp::Run {
                         pane: PaneHandle::TabRoot(1),
                         command: "cargo run".to_string(),
+                    },
+                ]
+            );
+        }
+
+        #[test]
+        fn should_keep_auto_split_direction_in_plan() {
+            let ws = Workspace {
+                name: "demo".to_string(),
+                tabs: vec![Tab {
+                    label: None,
+                    panes: vec![
+                        Pane {
+                            command: None,
+                            ..Default::default()
+                        },
+                        Pane {
+                            command: Some("watch".to_string()),
+                            split: SplitDirection::Auto,
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+
+            let plan = engine::plan_workspace(&ws);
+
+            assert_eq!(
+                plan,
+                vec![
+                    BackendOp::CreateWorkspace(WorkspaceOpts {
+                        label: "demo".to_string(),
+                        cwd: None,
+                        env: BTreeMap::new(),
+                        focus: false,
+                    }),
+                    BackendOp::SplitPane {
+                        from: PaneHandle::TabRoot(0),
+                        into: PaneHandle::Split(1),
+                        opts: SplitOpts {
+                            direction: SplitDirection::Auto,
+                            ratio: None,
+                            cwd: None,
+                            env: BTreeMap::new(),
+                            focus: false,
+                        },
+                    },
+                    BackendOp::Run {
+                        pane: PaneHandle::Split(1),
+                        command: "watch".to_string(),
                     },
                 ]
             );
@@ -1730,6 +1783,21 @@ mod tests {
                     },
                 }),
                 "pane split TabRoot(0) -> Split(1) --direction down --ratio 0.3 --cwd /proj/sub --env KEY='value' --focus"
+            );
+        }
+
+        #[test]
+        fn should_render_auto_split_direction() {
+            assert_eq!(
+                render_op(&BackendOp::SplitPane {
+                    from: PaneHandle::TabRoot(0),
+                    into: PaneHandle::Split(1),
+                    opts: SplitOpts {
+                        direction: SplitDirection::Auto,
+                        ..Default::default()
+                    },
+                }),
+                "pane split TabRoot(0) -> Split(1) --direction auto --no-focus"
             );
         }
 

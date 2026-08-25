@@ -49,7 +49,7 @@ $ herdr-spreader apply
 ## Features
 
 - **Declarative YAML layouts** — describe tabs and panes once, apply them as many times as you want.
-- **Nested pane splits** — split panes `right` or `down` with an optional `ratio`, chained from the previous pane, so you can build arbitrarily deep layouts.
+- **Nested pane splits** — split panes `right`, `down`, or `auto` with an optional `ratio`, chained from the previous pane, so you can build arbitrarily deep layouts. `auto` measures the previous pane (not the whole window): it converts that pane's cell rect with the current tty's cell pixel size when `TIOCGWINSZ` reports pixels, otherwise it treats cells as ~1:2.
 - **Per-pane and per-tab working directories** — set a `root` for the whole layout and override it per tab or per pane; relative paths resolve against their parent, `~` expands to your home directory.
 - **Environment variables at every level** — set env vars for the whole workspace or scope them to a single pane.
 - **Startup commands with synchronization** — run a command in each pane, and optionally `wait_for` a pattern in its output (with a timeout) before moving on — handy for "don't run the tests until the dev server says it's ready."
@@ -141,7 +141,7 @@ A layout file has four levels: the **file** (top level), **workspaces**, **tabs*
 | `command` | string | Shell command to run in this pane once it's created. |
 | `cwd` | path | Working directory for this pane, relative to the tab's `cwd` (and, transitively, `root`) unless it starts with `~` or `/`. |
 | `env` | map of string→string | Environment variables scoped to this pane. |
-| `split` | `right` \| `down` | Direction to split from the previous pane. Ignored for a tab's first pane. Default: `right`. |
+| `split` | `right` \| `down` \| `auto` | Direction to split from the previous pane. `auto` uses that pane's cell rect converted with the tty's cell pixel size when available, otherwise cells at ~1:2. Ignored for a tab's first pane. Default: `right`. |
 | `ratio` | float | Size ratio for the split (e.g. `0.3` gives the new pane 30% of the space). |
 | `wait_for.match` | string | Substring to wait for in the pane's output after running `command`, before moving on to the next pane. |
 | `wait_for.timeout_ms` | integer | How long to wait for the match, in milliseconds. |

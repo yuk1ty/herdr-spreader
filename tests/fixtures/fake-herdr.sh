@@ -51,6 +51,11 @@ JSON
 {"result":{"type":"pane_info","pane":{"pane_id":"wA:p3","tab_id":"wA:t1"}}}
 JSON
         ;;
+      layout)
+        cat <<'JSON'
+{"result":{"type":"pane_layout","layout":{"area":{"width":80,"height":120,"x":0,"y":0},"panes":[{"focused":true,"pane_id":"wA:p1","rect":{"width":80,"height":120,"x":0,"y":0}}]}}}
+JSON
+        ;;
       run|focus)
         # run/focus discard stdout; nothing to emit.
         ;;

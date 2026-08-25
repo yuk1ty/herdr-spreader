@@ -70,6 +70,86 @@ pub enum SplitDirection {
     #[default]
     Right,
     Down,
+    Auto,
+}
+
+impl SplitDirection {
+    /// Choose a concrete split from the previous pane's cell size.
+    ///
+    /// Terminal cells are typically about twice as tall as they are wide, so
+    /// a pane is treated as tall when `width < 2 * height`.
+    #[must_use]
+    pub fn for_size(width: u64, height: u64) -> Self {
+        if width < height.saturating_mul(2) {
+            Self::Down
+        } else {
+            Self::Right
+        }
+    }
+
+    /// Choose a concrete split from a visual pixel size.
+    ///
+    /// Unlike [`Self::for_size`], this compares width and height directly.
+    #[must_use]
+    pub fn for_pixels(width: u64, height: u64) -> Self {
+        if width < height {
+            Self::Down
+        } else {
+            Self::Right
+        }
+    }
+
+    /// Resolve `auto` against a pane's cell size and optional cell metrics.
+    ///
+    /// When metrics are present, the pane is converted to pixels first so the
+    /// comparison follows the pane itself rather than the host window.
+    #[must_use]
+    pub fn for_pane(self, pane_cols: u64, pane_rows: u64, metrics: Option<CellMetrics>) -> Self {
+        match self {
+            Self::Auto => match metrics {
+                Some(metrics) => {
+                    let (width, height) = visual_pane_size(pane_cols, pane_rows, metrics);
+                    Self::for_pixels(width, height)
+                }
+                None => Self::for_size(pane_cols, pane_rows),
+            },
+            other => other,
+        }
+    }
+
+    /// Resolve `auto` against a pane cell size; concrete directions are unchanged.
+    #[must_use]
+    pub fn resolve(self, width: u64, height: u64) -> Self {
+        self.for_pane(width, height, None)
+    }
+}
+
+/// Pixel size of one terminal cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CellMetrics {
+    pub col_px: u64,
+    pub row_px: u64,
+}
+
+/// Derive per-cell pixels from a tty `TIOCGWINSZ` snapshot.
+#[must_use]
+pub fn cell_metrics(cols: u64, rows: u64, xpixel: u64, ypixel: u64) -> Option<CellMetrics> {
+    if cols == 0 || rows == 0 || xpixel == 0 || ypixel == 0 {
+        return None;
+    }
+    Some(CellMetrics {
+        col_px: xpixel / cols,
+        row_px: ypixel / rows,
+    })
+}
+
+/// Convert a pane's cell rect into an approximate pixel rect.
+#[must_use]
+pub fn visual_pane_size(pane_cols: u64, pane_rows: u64, metrics: CellMetrics) -> (u64, u64) {
+    (
+        pane_cols.saturating_mul(metrics.col_px),
+        pane_rows.saturating_mul(metrics.row_px),
+    )
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -363,6 +443,57 @@ workspaces:
 
         let err = result.unwrap_err();
         assert!(err.to_string().contains("left"));
+    }
+
+    #[test]
+    fn should_parse_auto_split_direction() {
+        let yaml = r"
+workspaces:
+  - name: demo
+    tabs:
+      - panes:
+          - command: nvim
+          - split: auto
+            command: watch
+";
+
+        let file = SpreadFile::from_str(yaml).unwrap();
+
+        assert_eq!(
+            file.workspaces[0].tabs[0].panes[1].split,
+            SplitDirection::Auto
+        );
+    }
+
+    #[test]
+    fn should_split_tall_pane_down_and_wide_pane_right() {
+        assert_eq!(SplitDirection::for_size(80, 120), SplitDirection::Down);
+        assert_eq!(SplitDirection::for_size(122, 82), SplitDirection::Down);
+        assert_eq!(SplitDirection::for_size(160, 40), SplitDirection::Right);
+        assert_eq!(SplitDirection::for_size(180, 50), SplitDirection::Right);
+        assert_eq!(SplitDirection::for_size(80, 80), SplitDirection::Down);
+    }
+
+    #[test]
+    fn should_convert_pane_cells_with_measured_metrics() {
+        let metrics = cell_metrics(100, 50, 800, 1000).unwrap();
+        assert_eq!(visual_pane_size(122, 82, metrics), (976, 1640));
+        assert_eq!(
+            SplitDirection::Auto.for_pane(122, 82, Some(metrics)),
+            SplitDirection::Down
+        );
+        assert_eq!(
+            SplitDirection::Auto.for_pane(180, 40, Some(metrics)),
+            SplitDirection::Right
+        );
+        assert!(cell_metrics(80, 24, 0, 0).is_none());
+    }
+
+    #[test]
+    fn should_resolve_auto_and_leave_concrete_directions() {
+        assert_eq!(SplitDirection::Auto.resolve(80, 120), SplitDirection::Down);
+        assert_eq!(SplitDirection::Auto.resolve(160, 40), SplitDirection::Right);
+        assert_eq!(SplitDirection::Down.resolve(160, 40), SplitDirection::Down);
     }
 
     #[test]

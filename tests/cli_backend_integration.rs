@@ -196,6 +196,61 @@ fn should_focus_second_pane_when_focus_true_is_on_second_pane() {
     let _ = std::fs::remove_file(&log_path);
 }
 
+fn auto_split_log_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("fake_herdr_log_auto_split.txt")
+}
+
+#[test]
+fn should_resolve_auto_split_from_pane_layout_against_fake_herdr() {
+    let _lock = FAKE_HERDR_LOCK.lock().unwrap();
+    let log_path = auto_split_log_path();
+    let _ = std::fs::remove_file(&log_path);
+
+    unsafe {
+        std::env::set_var("FAKE_HERDR_LOG", &log_path);
+    }
+
+    let file = SpreadFile {
+        workspaces: vec![Workspace {
+            name: "demo".to_string(),
+            tabs: vec![Tab {
+                label: None,
+                panes: vec![
+                    Pane {
+                        command: None,
+                        ..Default::default()
+                    },
+                    Pane {
+                        command: Some("watch".to_string()),
+                        split: SplitDirection::Auto,
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+    };
+    let mut backend = CliBackend::new(fake_herdr_path(), None);
+
+    engine::apply(&file, &mut backend).expect("apply against fake herdr should succeed");
+
+    let log_contents = std::fs::read_to_string(&log_path).expect("fake herdr log should exist");
+    let logged_lines: Vec<&str> = log_contents.lines().collect();
+
+    assert_eq!(
+        logged_lines,
+        vec![
+            "workspace create --label demo --no-focus",
+            "pane layout --pane wA:p1",
+            "pane split wA:p1 --direction down --no-focus",
+            "pane run wA:p3 watch",
+        ]
+    );
+
+    let _ = std::fs::remove_file(&log_path);
+}
+
 #[test]
 fn should_produce_expected_plan_for_two_workspace_fixture_before_execution() {
     let file = build_spread_file();
