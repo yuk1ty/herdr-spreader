@@ -70,6 +70,30 @@ pub enum SplitDirection {
     #[default]
     Right,
     Down,
+    Auto,
+}
+
+impl SplitDirection {
+    /// Choose a concrete split from the previous pane's size.
+    ///
+    /// A tall pane (`height > width`) splits down; otherwise it splits right.
+    #[must_use]
+    pub fn for_size(width: u64, height: u64) -> Self {
+        if height > width {
+            Self::Down
+        } else {
+            Self::Right
+        }
+    }
+
+    /// Resolve `auto` against a pane size; concrete directions are unchanged.
+    #[must_use]
+    pub fn resolve(self, width: u64, height: u64) -> Self {
+        match self {
+            Self::Auto => Self::for_size(width, height),
+            other => other,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -363,6 +387,40 @@ workspaces:
 
         let err = result.unwrap_err();
         assert!(err.to_string().contains("left"));
+    }
+
+    #[test]
+    fn should_parse_auto_split_direction() {
+        let yaml = r"
+workspaces:
+  - name: demo
+    tabs:
+      - panes:
+          - command: nvim
+          - split: auto
+            command: watch
+";
+
+        let file = SpreadFile::from_str(yaml).unwrap();
+
+        assert_eq!(
+            file.workspaces[0].tabs[0].panes[1].split,
+            SplitDirection::Auto
+        );
+    }
+
+    #[test]
+    fn should_split_tall_pane_down_and_wide_pane_right() {
+        assert_eq!(SplitDirection::for_size(80, 120), SplitDirection::Down);
+        assert_eq!(SplitDirection::for_size(160, 40), SplitDirection::Right);
+        assert_eq!(SplitDirection::for_size(80, 80), SplitDirection::Right);
+    }
+
+    #[test]
+    fn should_resolve_auto_and_leave_concrete_directions() {
+        assert_eq!(SplitDirection::Auto.resolve(80, 120), SplitDirection::Down);
+        assert_eq!(SplitDirection::Auto.resolve(160, 40), SplitDirection::Right);
+        assert_eq!(SplitDirection::Down.resolve(160, 40), SplitDirection::Down);
     }
 
     #[test]
