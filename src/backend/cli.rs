@@ -31,6 +31,7 @@ pub(crate) fn tab_create_args(workspace_id: &str, opts: &TabOpts) -> Vec<String>
         args.push("--label".to_string());
         args.push(label.clone());
     }
+    push_env(&mut args, &opts.env);
     push_focus_flag(&mut args, opts.focus);
     args
 }
@@ -461,10 +462,13 @@ mod tests {
     }
 
     #[test]
-    fn should_build_tab_create_argv_with_workspace_cwd_label_and_no_focus() {
+    fn should_build_tab_create_argv_with_workspace_cwd_label_env_and_no_focus() {
+        let mut env = BTreeMap::new();
+        env.insert("FOO".to_string(), "bar".to_string());
         let opts = TabOpts {
             label: Some("editor".to_string()),
             cwd: Some(PathBuf::from("/proj/src")),
+            env,
             focus: false,
         };
 
@@ -481,6 +485,8 @@ mod tests {
                 "/proj/src",
                 "--label",
                 "editor",
+                "--env",
+                "FOO=bar",
                 "--no-focus"
             ]
         );
