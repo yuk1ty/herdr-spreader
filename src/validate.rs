@@ -70,16 +70,15 @@ pub(crate) fn validate(file: &SpreadFile) -> Vec<ValidationFinding> {
         }
 
         for tab in &ws.tabs {
+            let tab_label = tab.label.as_deref().unwrap_or("(unnamed)");
             if tab.panes.is_empty() {
                 findings.push(ValidationFinding {
                     severity: Severity::Warning,
-                    message: format!(
-                        "tab '{}' in workspace '{}' has no panes",
-                        tab.label.as_deref().unwrap_or("(unnamed)"),
-                        ws.name
-                    ),
+                    message: format!("tab '{tab_label}' in workspace '{}' has no panes", ws.name),
                 });
             }
+
+            findings.extend(validate_pane_split_sources(&ws.name, tab_label, tab));
 
             for pane in &tab.panes {
                 if let Some(ratio) = pane.ratio
@@ -114,6 +113,65 @@ pub(crate) fn validate(file: &SpreadFile) -> Vec<ValidationFinding> {
                 "{focus_count} workspaces have `focus: true`; only the last one will receive focus"
             ),
         });
+    }
+
+    findings
+}
+
+/// Check a tab's pane `id`/`from` declarations: ids must be non-empty and
+/// unique within the tab, and `from` must reference an id declared on an
+/// earlier pane of the same tab (the first pane, being the tab's root rather
+/// than a split, cannot use `from` at all).
+fn validate_pane_split_sources(
+    ws_name: &str,
+    tab_label: &str,
+    tab: &crate::config::Tab,
+) -> Vec<ValidationFinding> {
+    let mut findings = Vec::new();
+    let all_pane_ids: HashSet<&str> = tab.panes.iter().filter_map(|p| p.id.as_deref()).collect();
+    let mut earlier_pane_ids: HashSet<&str> = HashSet::new();
+
+    for (pane_index, pane) in tab.panes.iter().enumerate() {
+        if let Some(from) = pane.from.as_deref() {
+            if pane_index == 0 {
+                findings.push(ValidationFinding {
+                    severity: Severity::Error,
+                    message: format!(
+                        "the first pane in tab '{tab_label}' of workspace '{ws_name}' cannot use `from`: it is the tab's root pane, not a split"
+                    ),
+                });
+            } else if !earlier_pane_ids.contains(from) {
+                let reason = if all_pane_ids.contains(from) {
+                    "`from` may only reference a pane declared earlier in the same tab"
+                } else {
+                    "no pane in this tab declares that id"
+                };
+                findings.push(ValidationFinding {
+                    severity: Severity::Error,
+                    message: format!(
+                        "pane `from: {from}` in tab '{tab_label}' of workspace '{ws_name}' is invalid: {reason}"
+                    ),
+                });
+            }
+        }
+
+        if let Some(id) = pane.id.as_deref() {
+            if id.is_empty() {
+                findings.push(ValidationFinding {
+                    severity: Severity::Error,
+                    message: format!(
+                        "pane id in tab '{tab_label}' of workspace '{ws_name}' must not be empty"
+                    ),
+                });
+            } else if !earlier_pane_ids.insert(id) {
+                findings.push(ValidationFinding {
+                    severity: Severity::Error,
+                    message: format!(
+                        "duplicate pane id '{id}' in tab '{tab_label}' of workspace '{ws_name}'"
+                    ),
+                });
+            }
+        }
     }
 
     findings
@@ -452,6 +510,171 @@ mod tests {
             .filter(|f| f.message.contains("wait_for"))
             .collect();
         assert!(wait_findings.is_empty());
+    }
+
+    fn pane_with_id(id: &str) -> Pane {
+        Pane {
+            id: Some(id.to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn pane_from(from: &str) -> Pane {
+        Pane {
+            from: Some(from.to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn single_tab_file(panes: Vec<Pane>) -> SpreadFile {
+        SpreadFile {
+            workspaces: vec![Workspace {
+                name: "demo".to_string(),
+                tabs: vec![Tab {
+                    label: Some("main".to_string()),
+                    panes,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        }
+    }
+
+    #[test]
+    fn should_return_empty_findings_given_branching_layout_with_valid_from_references() {
+        let file = single_tab_file(vec![
+            pane_with_id("editor"),
+            Pane {
+                id: Some("agent".to_string()),
+                from: Some("editor".to_string()),
+                ..Default::default()
+            },
+            pane_from("editor"),
+        ]);
+        let findings = validate(&file);
+        assert!(findings.is_empty(), "unexpected findings: {findings:?}");
+    }
+
+    #[test]
+    fn should_report_error_given_duplicate_pane_ids_in_same_tab() {
+        let file = single_tab_file(vec![pane_with_id("editor"), pane_with_id("editor")]);
+        let findings = validate(&file);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].severity, Severity::Error);
+        assert!(findings[0].message.contains("duplicate pane id 'editor'"));
+    }
+
+    #[test]
+    fn should_not_report_error_given_same_pane_id_reused_in_different_tabs() {
+        let file = SpreadFile {
+            workspaces: vec![Workspace {
+                name: "demo".to_string(),
+                tabs: vec![
+                    Tab {
+                        panes: vec![pane_with_id("editor")],
+                        ..Default::default()
+                    },
+                    Tab {
+                        panes: vec![pane_with_id("editor")],
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }],
+        };
+        let findings = validate(&file);
+        assert!(findings.is_empty(), "unexpected findings: {findings:?}");
+    }
+
+    #[test]
+    fn should_report_error_given_empty_pane_id() {
+        let file = single_tab_file(vec![pane_with_id("")]);
+        let findings = validate(&file);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].severity, Severity::Error);
+        assert!(findings[0].message.contains("must not be empty"));
+    }
+
+    #[test]
+    fn should_report_error_given_from_on_the_first_pane_of_a_tab() {
+        let file = single_tab_file(vec![pane_from("editor"), pane_with_id("editor")]);
+        let findings = validate(&file);
+        let from_findings: Vec<_> = findings
+            .iter()
+            .filter(|f| f.message.contains("root pane"))
+            .collect();
+        assert_eq!(from_findings.len(), 1);
+        assert_eq!(from_findings[0].severity, Severity::Error);
+    }
+
+    #[test]
+    fn should_report_error_given_from_referencing_a_pane_declared_later() {
+        let file = single_tab_file(vec![
+            pane_with_id("editor"),
+            pane_from("git"),
+            pane_with_id("git"),
+        ]);
+        let findings = validate(&file);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].severity, Severity::Error);
+        assert!(findings[0].message.contains("earlier"));
+    }
+
+    #[test]
+    fn should_report_error_given_from_referencing_the_panes_own_id() {
+        let file = single_tab_file(vec![
+            pane_with_id("editor"),
+            Pane {
+                id: Some("agent".to_string()),
+                from: Some("agent".to_string()),
+                ..Default::default()
+            },
+        ]);
+        let findings = validate(&file);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].severity, Severity::Error);
+        assert!(findings[0].message.contains("earlier"));
+    }
+
+    #[test]
+    fn should_report_error_given_from_referencing_an_unknown_id() {
+        let file = single_tab_file(vec![pane_with_id("editor"), pane_from("editr")]);
+        let findings = validate(&file);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].severity, Severity::Error);
+        assert!(
+            findings[0]
+                .message
+                .contains("no pane in this tab declares that id")
+        );
+    }
+
+    #[test]
+    fn should_report_error_given_from_referencing_an_id_declared_in_another_tab() {
+        let file = SpreadFile {
+            workspaces: vec![Workspace {
+                name: "demo".to_string(),
+                tabs: vec![
+                    Tab {
+                        panes: vec![pane_with_id("editor")],
+                        ..Default::default()
+                    },
+                    Tab {
+                        panes: vec![Pane::default(), pane_from("editor")],
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }],
+        };
+        let findings = validate(&file);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].severity, Severity::Error);
+        assert!(
+            findings[0]
+                .message
+                .contains("no pane in this tab declares that id")
+        );
     }
 
     #[test]
