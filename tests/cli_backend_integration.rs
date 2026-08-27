@@ -196,6 +196,82 @@ fn should_focus_second_pane_when_focus_true_is_on_second_pane() {
     let _ = std::fs::remove_file(&log_path);
 }
 
+fn branching_log_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("fake_herdr_log_branching_from.txt")
+}
+
+fn build_spread_file_with_branching_from() -> SpreadFile {
+    SpreadFile {
+        workspaces: vec![Workspace {
+            name: "ws".to_string(),
+            tabs: vec![Tab {
+                label: Some("main".to_string()),
+                cwd: None,
+                panes: vec![
+                    Pane {
+                        id: Some("editor".to_string()),
+                        command: Some("nvim".to_string()),
+                        focus: true,
+                        ..Default::default()
+                    },
+                    Pane {
+                        id: Some("agent".to_string()),
+                        from: Some("editor".to_string()),
+                        split: SplitDirection::Right,
+                        ratio: Some(0.5),
+                        command: Some("htop".to_string()),
+                        ..Default::default()
+                    },
+                    Pane {
+                        id: Some("git".to_string()),
+                        from: Some("editor".to_string()),
+                        split: SplitDirection::Down,
+                        ratio: Some(0.6),
+                        command: Some("lazygit".to_string()),
+                        ..Default::default()
+                    },
+                ],
+            }],
+            ..Default::default()
+        }],
+    }
+}
+
+#[test]
+fn should_split_both_from_panes_off_the_tab_root_pane_against_fake_herdr() {
+    let _lock = FAKE_HERDR_LOCK.lock().unwrap();
+    let log_path = branching_log_path();
+    let _ = std::fs::remove_file(&log_path);
+
+    unsafe {
+        std::env::set_var("FAKE_HERDR_LOG", &log_path);
+    }
+
+    let file = build_spread_file_with_branching_from();
+    let mut backend = CliBackend::new(fake_herdr_path(), None);
+
+    engine::apply(&file, &mut backend).expect("apply against fake herdr should succeed");
+
+    let log_contents = std::fs::read_to_string(&log_path).expect("fake herdr log should exist");
+    let logged_lines: Vec<&str> = log_contents.lines().collect();
+
+    // Both splits target wA:p1 (the pane with `id: editor`), instead of the
+    // second split chaining off the first split's pane.
+    let expected_lines = vec![
+        "workspace create --label ws --focus",
+        "tab rename wA:t1 main",
+        "pane run wA:p1 nvim",
+        "pane split wA:p1 --direction right --ratio 0.5 --no-focus",
+        "pane run wA:p3 htop",
+        "pane split wA:p1 --direction down --ratio 0.6 --no-focus",
+        "pane run wA:p3 lazygit",
+    ];
+
+    assert_eq!(logged_lines, expected_lines);
+
+    let _ = std::fs::remove_file(&log_path);
+}
+
 #[test]
 fn should_produce_expected_plan_for_two_workspace_fixture_before_execution() {
     let file = build_spread_file();

@@ -49,7 +49,8 @@ $ herdr-spreader apply
 ## Features
 
 - **Declarative YAML layouts** — describe tabs and panes once, apply them as many times as you want.
-- **Nested pane splits** — split panes `right` or `down` with an optional `ratio`, chained from the previous pane, so you can build arbitrarily deep layouts.
+- **Nested pane splits** — split panes `right` or `down` with an optional `ratio`, chained from the previous pane by default, so you can build arbitrarily deep layouts.
+- **Branching layouts** — give a pane an `id` and split other panes `from` it to branch off any earlier pane instead of chaining, so layouts like an editor column with a full-height sidebar, or a 2×2 grid, are expressible (see [Branching layouts](#branching-layouts)).
 - **Per-pane and per-tab working directories** — set a `root` for the whole layout and override it per tab or per pane; relative paths resolve against their parent, `~` expands to your home directory.
 - **Environment variables at every level** — set env vars for the whole workspace or scope them to a single pane.
 - **Startup commands with synchronization** — run a command in each pane, and optionally `wait_for` a pattern in its output (with a timeout) before moving on — handy for "don't run the tests until the dev server says it's ready."
@@ -132,22 +133,63 @@ A layout file has four levels: the **file** (top level), **workspaces**, **tabs*
 |---|---|---|
 | `label` | string | Tab name. The first tab renames herdr's default tab instead of creating a new one. |
 | `cwd` | path | Working directory for this tab's panes, relative to `root` unless it starts with `~` or `/`. |
-| `panes` | list of [Pane](#pane) | Panes to create in this tab, in order. The first pane reuses the tab's root pane; every subsequent pane is created by splitting the previous one. |
+| `panes` | list of [Pane](#pane) | Panes to create in this tab, in order. The first pane reuses the tab's root pane; every subsequent pane is created by splitting the previous one — or the earlier pane named by its `from` key. |
 
 ### Pane
 
 | Key | Type | Description |
 |---|---|---|
+| `id` | string | Name for this pane, so a later pane in the same tab can split `from` it. Must be non-empty and unique within its tab (the same id may be reused in other tabs). |
 | `command` | string | Shell command to run in this pane once it's created. |
 | `cwd` | path | Working directory for this pane, relative to the tab's `cwd` (and, transitively, `root`) unless it starts with `~` or `/`. |
 | `env` | map of string→string | Environment variables scoped to this pane. |
-| `split` | `right` \| `down` | Direction to split from the previous pane. Ignored for a tab's first pane. Default: `right`. |
+| `split` | `right` \| `down` | Direction to split from the source pane (the previous pane, or the pane named by `from`). Ignored for a tab's first pane. Default: `right`. |
+| `from` | string | `id` of an **earlier** pane in the same tab to split from, instead of the previous pane. Splitting the same pane again targets its remaining region, which is what lets layouts branch (see [Branching layouts](#branching-layouts)). Not allowed on a tab's first pane — that pane is the tab's root, not a split. |
 | `ratio` | float | Size ratio for the split (e.g. `0.3` gives the new pane 30% of the space). |
 | `wait_for.match` | string | Substring to wait for in the pane's output after running `command`, before moving on to the next pane. |
 | `wait_for.timeout_ms` | integer | How long to wait for the match, in milliseconds. |
 | `focus` | boolean | Mark this pane to receive focus when it is created. When `true`, the pane's creation operation (`pane split` or `tab create`) is called with `--focus`, so the intended pane naturally receives focus during layout building. If no pane in the file has `focus: true`, the user's current focus is preserved. |
 
 Setting `wait_for` on a pane with no `command` is a configuration error and `apply` will fail — there's nothing to wait for output from.
+
+### Branching layouts
+
+By default each pane splits the *previous* pane, which chains splits into a staircase. To branch instead, name a pane with `id` and point a later pane's `from` at it. Splitting the same pane a second time splits its remaining region (exactly like running `herdr pane split` on that pane again by hand), so you can hang several panes off one anchor:
+
+```yaml
+workspaces:
+  - name: ws
+    root: ~/ws
+    tabs:
+      - label: main
+        panes:
+          - id: editor
+            command: nvim
+            focus: true
+          - id: agent
+            from: editor        # split the editor → full-height right column
+            split: right
+            ratio: 0.5
+            command: claude
+          - id: git
+            from: editor        # split the editor again → stacked under it
+            split: down
+            ratio: 0.6
+            command: lazygit
+```
+
+```
+┌────────────┬────────────┐
+│   editor   │            │
+│            │   agent    │
+├────────────┤            │
+│    git     │            │
+└────────────┴────────────┘
+```
+
+Without `from`, the `git` pane would have split the `agent` pane and ended up in the bottom-right corner instead of under the editor. The same technique yields a 2×2 grid: split the first pane `right`, then split each column `down` via `from`.
+
+`from` must name an `id` declared on an *earlier* pane in the same tab — duplicate ids in a tab, unknown or forward references, and `from` on a tab's first pane are configuration errors. Omitting `from` keeps the previous-pane chaining behaviour, so existing configs are unaffected.
 
 ### Path resolution
 
@@ -159,7 +201,7 @@ Paths compose top-down: `root` → tab `cwd` → pane `cwd`, each relative overr
 
 1. `herdr workspace create` — creates the workspace and its first tab/pane (with `--focus` if the first pane or the workspace is marked for focus).
 2. For each subsequent tab, `herdr tab create` — creates a new tab (with `--focus` if the first pane in that tab is marked).
-3. For each pane after the first in a tab, `herdr pane split` — splits off a new pane in the requested direction (with `--focus` if that pane is marked).
+3. For each pane after the first in a tab, `herdr pane split` — splits off a new pane in the requested direction from its source pane (the previous pane, or the pane named by `from`), with `--focus` if that pane is marked.
 4. `herdr pane run` — runs the configured command in each pane. A tab's or workspace's first pane can't be created with a working directory or environment variables the way split panes can, so `herdr-spreader` prefixes the command with `cd <dir> && export KEY=VAL && ...` for those panes.
 5. `herdr wait output` — for panes with `wait_for`, blocks until the pattern appears before continuing.
 

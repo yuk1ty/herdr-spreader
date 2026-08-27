@@ -187,6 +187,37 @@ pub fn apply(file: &SpreadFile, backend: &mut dyn HerdrBackend) -> Result<(), En
     execute_plan(&plan_file(file), backend)
 }
 
+/// Pick the pane a split branches off: the pane named by `from`, or the
+/// previous pane in the tab when `from` is omitted.
+///
+/// Panics if `from` names an id that no earlier pane in the same tab declared;
+/// configs that went through [`crate::validate::validate_config`] reject this
+/// case before planning.
+fn resolve_split_source(
+    pane: &crate::config::Pane,
+    previous_handle: &PaneHandle,
+    id_handles: &HashMap<&str, PaneHandle>,
+) -> PaneHandle {
+    pane.from.as_deref().map_or_else(
+        || previous_handle.clone(),
+        |id| {
+            id_handles
+                .get(id)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "pane `from: {id}` does not name an earlier pane id in the same tab; configs must be validated before planning"
+                    )
+                })
+                .clone()
+        },
+    )
+}
+
+/// # Panics
+///
+/// Panics if a pane's `from` names an id that no earlier pane in the same tab
+/// declared. Configs that went through [`crate::validate::validate_config`]
+/// reject this case before planning.
 #[must_use]
 pub fn plan_workspace(ws: &Workspace) -> Vec<BackendOp> {
     let first_pane_focus = ws
@@ -227,15 +258,17 @@ pub fn plan_workspace(ws: &Workspace) -> Vec<BackendOp> {
         }
 
         let mut previous_handle = root_handle;
+        let mut id_handles: HashMap<&str, PaneHandle> = HashMap::new();
 
         for (pane_index, pane) in tab.panes.iter().enumerate() {
             let pane_handle = if pane_index == 0 {
                 previous_handle.clone()
             } else {
+                let from_handle = resolve_split_source(pane, &previous_handle, &id_handles);
                 let new_handle = PaneHandle::Split(next_split);
                 next_split += 1;
                 ops.push(BackendOp::SplitPane {
-                    from: previous_handle.clone(),
+                    from: from_handle,
                     into: new_handle.clone(),
                     opts: SplitOpts {
                         direction: pane.split,
@@ -284,6 +317,9 @@ pub fn plan_workspace(ws: &Workspace) -> Vec<BackendOp> {
                 });
             }
 
+            if let Some(id) = pane.id.as_deref() {
+                id_handles.insert(id, pane_handle.clone());
+            }
             previous_handle = pane_handle;
         }
     }
@@ -1620,6 +1656,196 @@ mod tests {
                     },
                 ]
             );
+        }
+
+        #[test]
+        fn should_split_two_panes_from_the_same_source_pane_given_from_references() {
+            // The motivating branching layout: editor filling the left half,
+            // agent full-height on the right, git stacked under the editor.
+            let ws = Workspace {
+                name: "ws".to_string(),
+                tabs: vec![Tab {
+                    label: Some("main".to_string()),
+                    panes: vec![
+                        Pane {
+                            id: Some("editor".to_string()),
+                            command: Some("nvim".to_string()),
+                            focus: true,
+                            ..Default::default()
+                        },
+                        Pane {
+                            id: Some("agent".to_string()),
+                            from: Some("editor".to_string()),
+                            split: SplitDirection::Right,
+                            ratio: Some(0.5),
+                            command: Some("htop".to_string()),
+                            ..Default::default()
+                        },
+                        Pane {
+                            id: Some("git".to_string()),
+                            from: Some("editor".to_string()),
+                            split: SplitDirection::Down,
+                            ratio: Some(0.6),
+                            command: Some("lazygit".to_string()),
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+
+            let plan = engine::plan_workspace(&ws);
+
+            assert_eq!(
+                plan,
+                vec![
+                    BackendOp::CreateWorkspace(WorkspaceOpts {
+                        label: "ws".to_string(),
+                        cwd: None,
+                        env: BTreeMap::new(),
+                        focus: true,
+                    }),
+                    BackendOp::RenameFirstTab {
+                        label: "main".to_string(),
+                    },
+                    BackendOp::Run {
+                        pane: PaneHandle::TabRoot(0),
+                        command: "nvim".to_string(),
+                    },
+                    BackendOp::SplitPane {
+                        from: PaneHandle::TabRoot(0),
+                        into: PaneHandle::Split(1),
+                        opts: SplitOpts {
+                            direction: SplitDirection::Right,
+                            ratio: Some(0.5),
+                            cwd: None,
+                            env: BTreeMap::new(),
+                            focus: false,
+                        },
+                    },
+                    BackendOp::Run {
+                        pane: PaneHandle::Split(1),
+                        command: "htop".to_string(),
+                    },
+                    BackendOp::SplitPane {
+                        from: PaneHandle::TabRoot(0),
+                        into: PaneHandle::Split(2),
+                        opts: SplitOpts {
+                            direction: SplitDirection::Down,
+                            ratio: Some(0.6),
+                            cwd: None,
+                            env: BTreeMap::new(),
+                            focus: false,
+                        },
+                    },
+                    BackendOp::Run {
+                        pane: PaneHandle::Split(2),
+                        command: "lazygit".to_string(),
+                    },
+                ]
+            );
+        }
+
+        #[test]
+        fn should_chain_from_previous_pane_when_from_is_omitted_after_a_from_split() {
+            let ws = Workspace {
+                name: "demo".to_string(),
+                tabs: vec![Tab {
+                    panes: vec![
+                        Pane {
+                            id: Some("a".to_string()),
+                            ..Default::default()
+                        },
+                        Pane {
+                            from: Some("a".to_string()),
+                            ..Default::default()
+                        },
+                        Pane {
+                            command: Some("logs".to_string()),
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+
+            let plan = engine::plan_workspace(&ws);
+
+            // The third pane has no `from`, so it chains from the previous
+            // pane in the list — the Split(1) created right above it.
+            assert!(plan.contains(&BackendOp::SplitPane {
+                from: PaneHandle::Split(1),
+                into: PaneHandle::Split(2),
+                opts: SplitOpts::default(),
+            }));
+        }
+
+        #[test]
+        fn should_resolve_from_against_ids_of_the_same_tab_when_tabs_reuse_an_id() {
+            let branching_panes = |cmd: &str| {
+                vec![
+                    Pane {
+                        id: Some("editor".to_string()),
+                        ..Default::default()
+                    },
+                    Pane {
+                        from: Some("editor".to_string()),
+                        command: Some(cmd.to_string()),
+                        ..Default::default()
+                    },
+                ]
+            };
+            let ws = Workspace {
+                name: "demo".to_string(),
+                tabs: vec![
+                    Tab {
+                        panes: branching_panes("one"),
+                        ..Default::default()
+                    },
+                    Tab {
+                        panes: branching_panes("two"),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            };
+
+            let plan = engine::plan_workspace(&ws);
+
+            // Each tab's `from: editor` resolves to that tab's own root pane.
+            assert!(plan.contains(&BackendOp::SplitPane {
+                from: PaneHandle::TabRoot(0),
+                into: PaneHandle::Split(1),
+                opts: SplitOpts::default(),
+            }));
+            assert!(plan.contains(&BackendOp::SplitPane {
+                from: PaneHandle::TabRoot(1),
+                into: PaneHandle::Split(2),
+                opts: SplitOpts::default(),
+            }));
+        }
+
+        #[test]
+        #[should_panic(expected = "does not name an earlier pane id")]
+        fn should_panic_when_from_references_an_unknown_id_in_an_unvalidated_config() {
+            let ws = Workspace {
+                name: "demo".to_string(),
+                tabs: vec![Tab {
+                    panes: vec![
+                        Pane::default(),
+                        Pane {
+                            from: Some("missing".to_string()),
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+
+            let _ = engine::plan_workspace(&ws);
         }
 
         #[test]

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(config)* optional pane `id` and `from` keys, so a pane can split off any earlier pane in its tab instead of only chaining from the previous one — branching layouts like a full-height sidebar or a 2×2 grid become expressible
+
 ## [0.2.1](https://github.com/yuk1ty/herdr-spreader/compare/v0.2.0...v0.2.1) - 2026-08-16
 
 ### Fixed
