@@ -73,17 +73,13 @@ The one wrinkle: `herdr workspace create` and `herdr tab create` don't just crea
 - **A tab's first pane** (`pane_index == 0`) is never created directly — it's the root pane that came back from `create_workspace` (for the first tab) or `create_tab` (for every other tab). There is no `HerdrBackend::create_first_pane` call; it already exists.
 - **Every other pane** is created by `split_pane`, splitting off the previous pane in the tab.
 
-This asymmetry matters because `create_workspace`, `create_tab`, and `split_pane` each accept a `cwd`/`env` at creation time — but a first pane, having no creation call of its own, has no way to receive a pane-specific `cwd` or `env` through the API. The fix (after several review rounds got this wrong — see [History of the cwd/env bug](#history-of-the-cwden-bug)) is: when a first pane needs a `cwd` or `env` beyond what its workspace/tab baseline already gives it, `engine.rs` prefixes its `run` command with a shell snippet:
+The asymmetry is smaller than it looks, because `create_workspace`, `create_tab`, and `split_pane` each accept a `cwd`/`env` at creation time, and herdr applies all three to the same thing: the one shell process that call launches. herdr has no tab- or workspace-level environment — `--env` on `workspace create` or `tab create` simply sets env for the root pane's shell, and `--cwd` only *looks* tab-wide because a split with no `--cwd` inherits its parent pane's directory, tmux-style (verified empirically against herdr 0.8.2 by reading `/proc/<pid>/environ` and `/proc/<pid>/cwd` of the pane shells).
 
-```
-cd '<resolved dir>' && export KEY='value' && <the user's command>
-```
-
-built by `cwd_env_prefix` / `wrap_command_with_cwd_and_env`, with `shell_quote` doing POSIX single-quote escaping so paths and values with spaces or special characters survive intact. If the first pane has *no* command but does need a `cwd`/`env`, the bare `cd && export` line is still run — otherwise a `cwd:`-only entry in the YAML would be silently ignored. If the first pane needs neither, no `run` call happens at all, avoiding a pointless extra `cd .` (`needs_cwd_override`, called inside `plan_workspace`, decides this).
+So a first pane's `cwd`/`env` simply ride on the call that creates it: `plan_workspace` resolves them with `first_pane_cwd`/`first_pane_env` and puts them in the creation op's `WorkspaceOpts`/`TabOpts` — for the workspace call, `workspace_env` layers the first pane's `env` over the workspace-level `env` (the pane wins on conflicting keys). `Run` then always carries the pane's `command` verbatim, for first panes and splits alike, and a first pane with no `command` emits no `Run` at all — nothing is ever typed into any pane's shell besides its own `command`. (Earlier versions instead typed a `cd '<dir>' && export KEY='value' && <command>` prefix into first panes — see [History of the cwd/env bug](#history-of-the-cwden-bug) for why that was replaced.)
 
 Everything else follows directly from that split:
 
-- **Path composition** (`resolve_cwd` / `combine_cwd`) layers `root → tab.cwd → pane.cwd` top-down: each level is joined onto the previous one unless it's already absolute, in which case it replaces everything above it. `..` is deliberately left alone (the shell resolves it at `cd` time); only literal `.` components are stripped (`normalize_path`).
+- **Path composition** (`resolve_cwd` / `combine_cwd`) layers `root → tab.cwd → pane.cwd` top-down: each level is joined onto the previous one unless it's already absolute, in which case it replaces everything above it. `..` is deliberately left alone (the OS resolves it when herdr launches the pane's shell in that directory); only literal `.` components are stripped (`normalize_path`).
 - **`wait_for` on a pane with no `command`** is silently ignored: `plan_workspace` only emits a `Run` (and its companion `WaitOutput`) when the pane has a `command`. A `wait_for`-only pane produces no ops of its own — there's nothing to wait for. `EngineError` has no variant for this case (it only wraps `BackendError`); the silent-drop is intentional.
 - **IDs are never invented.** Every `workspace_id`/`tab_id`/`pane_id` used by a later call is one that came back from an earlier `HerdrBackend` response. herdr's own ids get compacted as things are created/closed, so the engine only ever trusts what the backend just told it.
 
@@ -130,7 +126,7 @@ config::resolve_paths(..., invocation_cwd)
 
 ### History of the cwd/env bug
 
-This subsystem went through six rounds of review, each fixing a real bug the previous round introduced or missed. It's documented here because the same class of mistake is easy to reintroduce:
+This subsystem went through several rounds of review, each fixing a real bug the previous round introduced or missed. It's documented here because the same class of mistake is easy to reintroduce:
 
 1. First panes silently dropped `tab.cwd`/`pane.cwd`/`pane.env` entirely (no creation call to pass them to).
 2. The fix (a `cd`-prefixed command) broke on `~` and relative `root`, because a single-quoted `cd` can't trigger shell tilde expansion, and a relative root got joined onto itself.
@@ -138,6 +134,7 @@ This subsystem went through six rounds of review, each fixing a real bug the pre
 4. With no `root` at all, relative `tab.cwd`/`pane.cwd` had no absolute base and leaked through unresolved.
 5. A guessed JSON schema for reading the invocation directory out of `HERDR_PLUGIN_CONTEXT_JSON` turned out to be unverifiable and likely wrong — replaced by the documented `pane.get`/`foreground_cwd` query described above.
 6. (Neutral review, approved) — confirmed the fixes above compose correctly across first panes, split panes, tab 0 vs. tab N, and standalone-vs-plugin invocation.
+7. The `cd`/`export` prefix was then retired entirely: once herdr's `--cwd`/`--env` on `workspace create`/`tab create` were verified to have exactly the per-pane semantics splits already get, first-pane `cwd`/`env` moved onto the creation calls. Typing the prefix had forced users to nest a shell (`command: zsh`) on first panes so `.zshrc`-driven env hooks would see the variables — and copying that `command: zsh` onto split panes (where env is applied at launch) corrupted shells that prefill their line buffer from an env var.
 
 If you're touching path resolution, add a test for the *specific* combination you changed (root present/absent, tilde/relative/absolute, tab 0 vs. later tabs, first pane vs. split pane) — this area has a track record of looking correct in isolation while being wrong in combination.
 

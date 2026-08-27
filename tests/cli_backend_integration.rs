@@ -196,6 +196,83 @@ fn should_focus_second_pane_when_focus_true_is_on_second_pane() {
     let _ = std::fs::remove_file(&log_path);
 }
 
+fn first_pane_cwd_env_log_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("fake_herdr_log_first_pane_cwd_env.txt")
+}
+
+fn build_spread_file_with_first_pane_cwd_env() -> SpreadFile {
+    let env_of = |value: &str| BTreeMap::from([("PREFILL".to_string(), value.to_string())]);
+    SpreadFile {
+        workspaces: vec![Workspace {
+            name: "demo".to_string(),
+            root: Some(PathBuf::from("/proj")),
+            tabs: vec![
+                Tab {
+                    label: Some("editor".to_string()),
+                    cwd: None,
+                    panes: vec![
+                        Pane {
+                            command: Some("nvim".to_string()),
+                            cwd: Some(PathBuf::from("./app")),
+                            env: env_of("cargo run"),
+                            ..Default::default()
+                        },
+                        Pane {
+                            command: Some("lazygit".to_string()),
+                            ..Default::default()
+                        },
+                    ],
+                },
+                Tab {
+                    label: Some("server".to_string()),
+                    cwd: Some(PathBuf::from("./svc")),
+                    panes: vec![Pane {
+                        command: None,
+                        env: env_of("pnpm dev"),
+                        ..Default::default()
+                    }],
+                },
+            ],
+            ..Default::default()
+        }],
+    }
+}
+
+#[test]
+fn should_pass_first_pane_cwd_and_env_on_creation_calls_against_fake_herdr() {
+    let _lock = FAKE_HERDR_LOCK.lock().unwrap();
+    let log_path = first_pane_cwd_env_log_path();
+    let _ = std::fs::remove_file(&log_path);
+
+    unsafe {
+        std::env::set_var("FAKE_HERDR_LOG", &log_path);
+    }
+
+    let file = build_spread_file_with_first_pane_cwd_env();
+    let mut backend = CliBackend::new(fake_herdr_path(), None);
+
+    engine::apply(&file, &mut backend).expect("apply against fake herdr should succeed");
+
+    let log_contents = std::fs::read_to_string(&log_path).expect("fake herdr log should exist");
+    let logged_lines: Vec<&str> = log_contents.lines().collect();
+
+    // Each first pane's cwd/env ride on its tab's creation call instead of
+    // being typed into the shell as `cd … && export …`; the second tab's
+    // command-less pane therefore produces no `pane run` at all.
+    let expected_lines = vec![
+        "workspace create --cwd /proj/app --label demo --env PREFILL=cargo run --no-focus",
+        "tab rename wA:t1 editor",
+        "pane run wA:p1 nvim",
+        "pane split wA:p1 --direction right --cwd /proj --no-focus",
+        "pane run wA:p3 lazygit",
+        "tab create --workspace wA --cwd /proj/svc --label server --env PREFILL=pnpm dev --no-focus",
+    ];
+
+    assert_eq!(logged_lines, expected_lines);
+
+    let _ = std::fs::remove_file(&log_path);
+}
+
 #[test]
 fn should_produce_expected_plan_for_two_workspace_fixture_before_execution() {
     let file = build_spread_file();
@@ -242,6 +319,7 @@ fn should_produce_expected_plan_for_two_workspace_fixture_before_execution() {
             opts: TabOpts {
                 label: Some("server".into()),
                 cwd: None,
+                env: BTreeMap::new(),
                 focus: false,
             },
         },

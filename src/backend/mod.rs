@@ -26,6 +26,7 @@ pub struct WorkspaceCreated {
 pub struct TabOpts {
     pub label: Option<String>,
     pub cwd: Option<PathBuf>,
+    pub env: BTreeMap<String, String>,
     pub focus: bool,
 }
 

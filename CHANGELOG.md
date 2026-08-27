@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- *(engine)* a first pane's `cwd`/`env` now ride on `workspace create`/`tab create` via `--cwd`/`--env` (herdr applies them to the root-pane shell it launches, the same semantics splits already had) instead of typing `cd … && export … &&` into the pane's shell — first panes start clean with the env already set, `command: zsh` workarounds are no longer needed, and a command-less first pane with `cwd`/`env` no longer runs anything
+
 ## [0.2.1](https://github.com/yuk1ty/herdr-spreader/compare/v0.2.0...v0.2.1) - 2026-08-16
 
 ### Fixed

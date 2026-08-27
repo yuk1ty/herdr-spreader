@@ -157,10 +157,10 @@ Paths compose top-down: `root` → tab `cwd` → pane `cwd`, each relative overr
 
 `herdr-spreader` doesn't call any private herdr API — it drives the same `herdr` CLI you'd use by hand, repeating steps 1-5 below for each workspace in the file, in order. Focus is not deferred to a final step; instead, when a pane is marked `focus: true`, its creation operation (`workspace create`, `tab create`, or `pane split`) is called with `--focus`, so the intended pane naturally receives focus during layout building:
 
-1. `herdr workspace create` — creates the workspace and its first tab/pane (with `--focus` if the first pane or the workspace is marked for focus).
-2. For each subsequent tab, `herdr tab create` — creates a new tab (with `--focus` if the first pane in that tab is marked).
+1. `herdr workspace create` — creates the workspace and its first tab/pane, passing the first pane's resolved `cwd` and `env` via `--cwd`/`--env` (herdr applies them to the root-pane shell it launches) and `--focus` if the first pane or the workspace is marked for focus.
+2. For each subsequent tab, `herdr tab create` — creates a new tab, likewise passing its first pane's resolved `cwd`/`env`, with `--focus` if the first pane in that tab is marked.
 3. For each pane after the first in a tab, `herdr pane split` — splits off a new pane in the requested direction (with `--focus` if that pane is marked).
-4. `herdr pane run` — runs the configured command in each pane. A tab's or workspace's first pane can't be created with a working directory or environment variables the way split panes can, so `herdr-spreader` prefixes the command with `cd <dir> && export KEY=VAL && ...` for those panes.
+4. `herdr pane run` — runs the configured command in each pane. Because `cwd`/`env` always ride on the creation calls, nothing is ever typed into a pane's shell besides the pane's own `command`.
 5. `herdr wait output` — for panes with `wait_for`, blocks until the pattern appears before continuing.
 
 Every operation explicitly passes either `--focus` or `--no-focus`, so focus behaviour is deterministic: the final focused pane is the last one created with `--focus` (the pane marked `focus: true`, or the last workspace with `focus: true` and no pane-level override).

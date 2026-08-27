@@ -31,32 +31,6 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', r"'\''"))
 }
 
-fn cwd_env_prefix(cwd: Option<&Path>, env: &BTreeMap<String, String>) -> Option<String> {
-    let mut prefix_parts = Vec::new();
-    if let Some(cwd) = cwd {
-        prefix_parts.push(format!("cd {}", shell_quote(&cwd.display().to_string())));
-    }
-    for (key, value) in env {
-        prefix_parts.push(format!("export {key}={}", shell_quote(value)));
-    }
-    if prefix_parts.is_empty() {
-        None
-    } else {
-        Some(prefix_parts.join(" && "))
-    }
-}
-
-fn wrap_command_with_cwd_and_env(
-    command: &str,
-    cwd: Option<&Path>,
-    env: &BTreeMap<String, String>,
-) -> String {
-    match cwd_env_prefix(cwd, env) {
-        Some(prefix) => format!("{prefix} && {command}"),
-        None => command.to_string(),
-    }
-}
-
 fn normalize_path(path: &Path) -> PathBuf {
     let mut result = PathBuf::new();
     for component in path.components() {
@@ -187,6 +161,39 @@ pub fn apply(file: &SpreadFile, backend: &mut dyn HerdrBackend) -> Result<(), En
     execute_plan(&plan_file(file), backend)
 }
 
+/// Cwd for a tab's root pane: workspace root overlaid with the tab's cwd,
+/// then the first pane's cwd — the same layering split panes get.
+fn first_pane_cwd(ws: &Workspace, tab: &crate::config::Tab) -> Option<PathBuf> {
+    resolve_cwd(
+        ws.root.as_deref(),
+        tab.cwd.as_deref(),
+        tab.panes.first().and_then(|p| p.cwd.as_deref()),
+    )
+}
+
+/// Env for a tab's root pane: the first pane's own env.
+fn first_pane_env(tab: &crate::config::Tab) -> BTreeMap<String, String> {
+    tab.panes.first().map(|p| p.env.clone()).unwrap_or_default()
+}
+
+/// Cwd for the `workspace create` call: the first tab's root-pane cwd, or the
+/// bare workspace root when there are no tabs.
+fn workspace_cwd(ws: &Workspace) -> Option<PathBuf> {
+    ws.tabs
+        .first()
+        .map_or_else(|| ws.root.clone(), |tab| first_pane_cwd(ws, tab))
+}
+
+/// Env for the `workspace create` call: the workspace env with the first
+/// pane's env layered on top (the pane wins on conflicting keys).
+fn workspace_env(ws: &Workspace) -> BTreeMap<String, String> {
+    let mut env = ws.env.clone();
+    if let Some(tab) = ws.tabs.first() {
+        env.extend(first_pane_env(tab));
+    }
+    env
+}
+
 #[must_use]
 pub fn plan_workspace(ws: &Workspace) -> Vec<BackendOp> {
     let first_pane_focus = ws
@@ -198,8 +205,8 @@ pub fn plan_workspace(ws: &Workspace) -> Vec<BackendOp> {
     let mut ops = Vec::new();
     ops.push(BackendOp::CreateWorkspace(WorkspaceOpts {
         label: ws.name.clone(),
-        cwd: ws.root.clone(),
-        env: ws.env.clone(),
+        cwd: workspace_cwd(ws),
+        env: workspace_env(ws),
         focus: ws.focus || first_pane_focus,
     }));
 
@@ -220,7 +227,8 @@ pub fn plan_workspace(ws: &Workspace) -> Vec<BackendOp> {
                 index: tab_index,
                 opts: TabOpts {
                     label: tab.label.clone(),
-                    cwd: resolve_cwd(ws.root.as_deref(), tab.cwd.as_deref(), None),
+                    cwd: first_pane_cwd(ws, tab),
+                    env: first_pane_env(tab),
                     focus: first_pane_focus,
                 },
             });
@@ -252,22 +260,10 @@ pub fn plan_workspace(ws: &Workspace) -> Vec<BackendOp> {
                 new_handle
             };
 
-            let needs_cwd_override = pane.cwd.is_some() || (tab_index == 0 && tab.cwd.is_some());
-            let resolved_cwd = if pane_index == 0 && needs_cwd_override {
-                resolve_cwd(ws.root.as_deref(), tab.cwd.as_deref(), pane.cwd.as_deref())
-            } else {
-                None
-            };
-
             if let Some(command) = &pane.command {
-                let command_to_run = if pane_index == 0 {
-                    wrap_command_with_cwd_and_env(command, resolved_cwd.as_deref(), &pane.env)
-                } else {
-                    command.clone()
-                };
                 ops.push(BackendOp::Run {
                     pane: pane_handle.clone(),
-                    command: command_to_run,
+                    command: command.clone(),
                 });
                 if let Some(wait_for) = &pane.wait_for {
                     ops.push(BackendOp::WaitOutput {
@@ -275,13 +271,6 @@ pub fn plan_workspace(ws: &Workspace) -> Vec<BackendOp> {
                         wait: wait_for.clone(),
                     });
                 }
-            } else if pane_index == 0
-                && let Some(prefix) = cwd_env_prefix(resolved_cwd.as_deref(), &pane.env)
-            {
-                ops.push(BackendOp::Run {
-                    pane: pane_handle.clone(),
-                    command: prefix,
-                });
             }
 
             previous_handle = pane_handle;
@@ -324,6 +313,9 @@ pub fn render_op(op: &BackendOp) -> String {
             }
             if let Some(cwd) = &opts.cwd {
                 write!(s, " --cwd {}", cwd.display()).unwrap();
+            }
+            for (k, v) in &opts.env {
+                write!(s, " --env {k}={}", shell_quote(v)).unwrap();
             }
             s.push_str(if opts.focus {
                 " --focus"
@@ -560,6 +552,7 @@ mod tests {
                     opts: TabOpts {
                         label: None,
                         cwd: None,
+                        env: BTreeMap::new(),
                         focus: false,
                     },
                 },
@@ -768,6 +761,7 @@ mod tests {
                         opts: TabOpts {
                             label: Some("server".to_string()),
                             cwd: Some(PathBuf::from("/proj/svc")),
+                            env: BTreeMap::new(),
                             focus: false,
                         },
                     },
@@ -975,7 +969,7 @@ mod tests {
         }
 
         #[test]
-        fn should_wrap_first_pane_command_with_cd_and_env_export_given_overrides() {
+        fn should_pass_first_pane_cwd_and_env_on_create_workspace_and_run_the_bare_command() {
             let mut pane_env = BTreeMap::new();
             pane_env.insert("FOO".to_string(), "bar".to_string());
 
@@ -988,7 +982,7 @@ mod tests {
                     panes: vec![Pane {
                         command: Some("nvim".to_string()),
                         cwd: Some(PathBuf::from("./inner")),
-                        env: pane_env,
+                        env: pane_env.clone(),
                         ..Default::default()
                     }],
                 }],
@@ -1002,20 +996,20 @@ mod tests {
                 vec![
                     BackendOp::CreateWorkspace(WorkspaceOpts {
                         label: "demo".to_string(),
-                        cwd: Some(PathBuf::from("/proj")),
-                        env: BTreeMap::new(),
+                        cwd: Some(PathBuf::from("/proj/sub/inner")),
+                        env: pane_env,
                         focus: false,
                     }),
                     BackendOp::Run {
                         pane: PaneHandle::TabRoot(0),
-                        command: "cd '/proj/sub/inner' && export FOO='bar' && nvim".to_string(),
+                        command: "nvim".to_string(),
                     },
                 ]
             );
         }
 
         #[test]
-        fn should_emit_run_op_with_bare_cd_and_export_when_first_pane_has_cwd_env_but_no_command() {
+        fn should_emit_no_run_op_when_first_pane_has_cwd_and_env_but_no_command() {
             let mut pane_env = BTreeMap::new();
             pane_env.insert("FOO".to_string(), "bar".to_string());
 
@@ -1027,10 +1021,87 @@ mod tests {
                     cwd: Some(PathBuf::from("./sub")),
                     panes: vec![Pane {
                         command: None,
-                        env: pane_env,
+                        env: pane_env.clone(),
                         ..Default::default()
                     }],
                 }],
+                ..Default::default()
+            };
+
+            let plan = engine::plan_workspace(&ws);
+
+            assert_eq!(
+                plan,
+                vec![BackendOp::CreateWorkspace(WorkspaceOpts {
+                    label: "demo".to_string(),
+                    cwd: Some(PathBuf::from("/proj/sub")),
+                    env: pane_env,
+                    focus: false,
+                })]
+            );
+        }
+
+        #[test]
+        fn should_layer_first_pane_env_over_workspace_env_in_create_workspace_opts() {
+            let mut ws_env = BTreeMap::new();
+            ws_env.insert("SHARED".to_string(), "ws".to_string());
+            ws_env.insert("BASE".to_string(), "ws".to_string());
+            let mut pane_env = BTreeMap::new();
+            pane_env.insert("SHARED".to_string(), "pane".to_string());
+
+            let ws = Workspace {
+                name: "demo".to_string(),
+                env: ws_env,
+                tabs: vec![Tab {
+                    panes: vec![Pane {
+                        env: pane_env,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+
+            let plan = engine::plan_workspace(&ws);
+
+            let mut expected_env = BTreeMap::new();
+            expected_env.insert("BASE".to_string(), "ws".to_string());
+            expected_env.insert("SHARED".to_string(), "pane".to_string());
+            assert_eq!(
+                plan,
+                vec![BackendOp::CreateWorkspace(WorkspaceOpts {
+                    label: "demo".to_string(),
+                    cwd: None,
+                    env: expected_env,
+                    focus: false,
+                })]
+            );
+        }
+
+        #[test]
+        fn should_pass_first_pane_cwd_and_env_into_create_tab_opts_for_second_tab() {
+            let mut pane_env = BTreeMap::new();
+            pane_env.insert("FOO".to_string(), "bar".to_string());
+
+            let ws = Workspace {
+                name: "demo".to_string(),
+                root: Some(PathBuf::from("/proj")),
+                tabs: vec![
+                    Tab {
+                        panes: vec![Pane::default()],
+                        ..Default::default()
+                    },
+                    Tab {
+                        label: Some("server".to_string()),
+                        cwd: Some(PathBuf::from("./svc")),
+                        panes: vec![Pane {
+                            command: Some("cargo run".to_string()),
+                            cwd: Some(PathBuf::from("./api")),
+                            env: pane_env.clone(),
+                            ..Default::default()
+                        }],
+                    },
+                ],
                 ..Default::default()
             };
 
@@ -1045,9 +1116,18 @@ mod tests {
                         env: BTreeMap::new(),
                         focus: false,
                     }),
+                    BackendOp::CreateTab {
+                        index: 1,
+                        opts: TabOpts {
+                            label: Some("server".to_string()),
+                            cwd: Some(PathBuf::from("/proj/svc/api")),
+                            env: pane_env,
+                            focus: false,
+                        },
+                    },
                     BackendOp::Run {
-                        pane: PaneHandle::TabRoot(0),
-                        command: "cd '/proj/sub' && export FOO='bar'".to_string(),
+                        pane: PaneHandle::TabRoot(1),
+                        command: "cargo run".to_string(),
                     },
                 ]
             );
@@ -1122,6 +1202,7 @@ mod tests {
                         opts: TabOpts {
                             label: Some("server".to_string()),
                             cwd: Some(PathBuf::from("/proj/svc")),
+                            env: BTreeMap::new(),
                             focus: false,
                         },
                     },
@@ -1174,6 +1255,7 @@ mod tests {
                         opts: TabOpts {
                             label: Some("server".to_string()),
                             cwd: None,
+                            env: BTreeMap::new(),
                             focus: true,
                         },
                     },
@@ -1600,6 +1682,7 @@ mod tests {
                         opts: TabOpts {
                             label: None,
                             cwd: None,
+                            env: BTreeMap::new(),
                             focus: false,
                         },
                     },
@@ -1691,10 +1774,11 @@ mod tests {
                     opts: TabOpts {
                         label: Some("server".into()),
                         cwd: Some(PathBuf::from("/proj/svc")),
+                        env: BTreeMap::from([("KEY".to_string(), "value".to_string())]),
                         focus: true,
                     },
                 }),
-                "tab create --index 2 --label 'server' --cwd /proj/svc --focus"
+                "tab create --index 2 --label 'server' --cwd /proj/svc --env KEY='value' --focus"
             );
         }
 
@@ -1706,6 +1790,7 @@ mod tests {
                     opts: TabOpts {
                         label: None,
                         cwd: None,
+                        env: BTreeMap::new(),
                         focus: false,
                     },
                 }),
