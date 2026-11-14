@@ -93,7 +93,7 @@ Everything else follows directly from that split:
 - **`wait_for` on a pane with no `command`** is silently ignored: `plan_workspace` only emits a `Run` (and its companion `WaitOutput`) when the pane has a `command`. A `wait_for`-only pane produces no ops of its own — there's nothing to wait for. `EngineError` has no variant for this case (it only wraps `BackendError`); the silent-drop is intentional.
 - **IDs are never invented.** Every `workspace_id`/`tab_id`/`pane_id` used by a later call is one that came back from an earlier `HerdrBackend` response. herdr's own ids get compacted as things are created/closed, so the engine only ever trusts what the backend just told it.
 
-- **Focus on a skipped workspace is workspace-level.** When an existing workspace is skipped but its config entry would have been focused, `execute_plan` calls `herdr workspace focus <id>` with the id from the pre-flight `workspace list` — no attempt is made to focus a specific pane inside it, because the name-only identity rule cannot map config panes onto live panes. Within-file duplicates emit `SkipWorkspace` without a focus op, since the id of the just-created first occurrence is not known at plan time.
+- **Focus on a skipped workspace is workspace-level.** When an existing workspace is skipped but its config entry would have been focused, `execute_plan` calls `herdr workspace focus <id>` with the id from the pre-flight `workspace list` — no attempt is made to focus a specific pane inside it, because the name-only identity rule cannot map config panes onto live panes.
 
 ### Focus
 

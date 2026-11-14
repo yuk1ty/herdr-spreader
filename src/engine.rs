@@ -318,7 +318,8 @@ fn workspace_wants_focus(ws: &Workspace) -> bool {
 
 #[must_use]
 pub fn plan_file(file: &SpreadFile, existing: &ExistingWorkspaces) -> Vec<BackendOp> {
-    let mut planned: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    // Duplicate names within one file are rejected by the config validation
+    // boundary (validate.rs); this function trusts its input.
     let mut ops = Vec::new();
     for ws in &file.workspaces {
         if let Some(id) = existing.id_of(&ws.name) {
@@ -330,13 +331,6 @@ pub fn plan_file(file: &SpreadFile, existing: &ExistingWorkspaces) -> Vec<Backen
                     workspace_id: id.to_string(),
                 });
             }
-        } else if !planned.insert(&ws.name) {
-            // A same-named workspace earlier in this same file was already
-            // planned; creating it again would duplicate it exactly like a
-            // second `apply` run used to.
-            ops.push(BackendOp::SkipWorkspace {
-                label: ws.name.clone(),
-            });
         } else {
             ops.extend(plan_workspace(ws));
         }
@@ -1826,9 +1820,9 @@ mod tests {
         }
 
         #[test]
-        fn should_skip_second_occurrence_of_duplicate_label_within_one_file() {
+        fn should_create_every_workspace_when_none_exists_by_name() {
             let file = SpreadFile {
-                workspaces: vec![demo_workspace("demo"), demo_workspace("demo")],
+                workspaces: vec![demo_workspace("alpha"), demo_workspace("beta")],
             };
 
             let plan = engine::plan_file(&file, &ExistingWorkspaces::default());
@@ -1837,13 +1831,7 @@ mod tests {
                 plan.iter()
                     .filter(|op| matches!(op, BackendOp::CreateWorkspace(_)))
                     .count(),
-                1
-            );
-            assert_eq!(
-                plan.last(),
-                Some(&BackendOp::SkipWorkspace {
-                    label: "demo".to_string(),
-                })
+                2
             );
         }
     }

@@ -45,17 +45,29 @@ fn main() -> anyhow::Result<()> {
                 .map(ExistingWorkspaces::from_list)?;
             let spread_file = resolve_paths(&spread_file, &env, &cwd);
 
+            let plan = engine::plan_file(&spread_file, &existing);
+            warn_skipped(&plan);
+
             if dry_run {
-                let plan = engine::plan_file(&spread_file, &existing);
                 for op in &plan {
                     println!("{}", engine::render_op(op));
                 }
                 return Ok(());
             }
 
-            engine::apply(&spread_file, &existing, &mut backend)?;
+            engine::execute_plan(&plan, &mut backend)?;
 
             Ok(())
+        }
+    }
+}
+
+fn warn_skipped(plan: &[engine::BackendOp]) {
+    for op in plan {
+        if let engine::BackendOp::SkipWorkspace { label } = op {
+            eprintln!(
+                "warning: skipping workspace '{label}' (already exists); its tabs, panes, and commands are left untouched"
+            );
         }
     }
 }
