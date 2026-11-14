@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use clap::Parser;
 
 use herdr_spreader::backend::cli::CliBackend;
+use herdr_spreader::backend::{ExistingWorkspaces, HerdrBackend};
 use herdr_spreader::cli::{Cli, Command};
 use herdr_spreader::config::{read_config, resolve_config_path, resolve_paths};
 use herdr_spreader::engine;
@@ -39,17 +40,20 @@ fn main() -> anyhow::Result<()> {
                 Some(cwd) => cwd,
                 None => std::env::current_dir()?,
             };
+            let existing = backend
+                .list_workspaces()
+                .map(ExistingWorkspaces::from_list)?;
             let spread_file = resolve_paths(&spread_file, &env, &cwd);
 
             if dry_run {
-                let plan = engine::plan_file(&spread_file);
+                let plan = engine::plan_file(&spread_file, &existing);
                 for op in &plan {
                     println!("{}", engine::render_op(op));
                 }
                 return Ok(());
             }
 
-            engine::apply(&spread_file, &mut backend)?;
+            engine::apply(&spread_file, &existing, &mut backend)?;
 
             Ok(())
         }

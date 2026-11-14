@@ -40,15 +40,21 @@ String (raw file contents, ownership kept by the caller)
     │    only Ok proceeds to path resolution and the engine
     ▼
 SpreadFile { workspaces: Vec<Workspace> }  (raw, as written by the user)
+    │  HerdrBackend::list_workspaces → herdr workspace list
+    │  → ExistingWorkspaces (label → workspace_id index, built once before
+    │    anything is created, so skip decisions are settled up front)
+    ▼
+SpreadFile + ExistingWorkspaces
     │  config::resolve_paths(file, env, invocation_cwd)
     │  — resolves each workspace's root independently; every workspace gets its
     │    own absolute root, defaulted and ~-expanded exactly as a single-workspace
     │    config would be
     ▼
 SpreadFile (every workspace's root defaulted + absolute, ~ expanded everywhere)
-    │  engine::plan_file(&file)
+    │  engine::plan_file(&file, &existing)
     ▼
-Vec<BackendOp> — one flat plan for the whole file
+Vec<BackendOp> — one flat plan for the whole file (SkipWorkspace /
+FocusExistingWorkspace for workspaces that already exist by name)
     │  engine::execute_plan(plan, &mut backend)
     ▼
 walk the plan in order; each `create_*` / `split_pane` returns an id that is
@@ -68,7 +74,7 @@ The one wrinkle: `herdr workspace create` and `herdr tab create` don't just crea
 
 ## `engine.rs`: why "first panes" are special-cased
 
-`engine::plan_file(&file)` is a pure Calculation: it loops over `file.workspaces` in order, calling `plan_workspace(workspace)` for each one, and concatenates the resulting `Vec<BackendOp>` into a single flat plan for the whole file. All of the interesting per-layout logic lives in `plan_workspace`, which walks `workspace.tabs[*].panes[*]` and, for each pane, decides which `BackendOp` creates it:
+`engine::plan_file(&file, &existing)` is a pure Calculation: it loops over `file.workspaces` in order, and for each one first consults the `ExistingWorkspaces` index — a workspace whose label is already taken (in the live session, or earlier in the same file) plans to a `SkipWorkspace` op, plus a `FocusExistingWorkspace` op when that workspace would have been created with focus (workspace-level `focus: true` or a focused first pane). Only workspaces that pass that check are forwarded to `plan_workspace`, which walks `workspace.tabs[*].panes[*]` and, for each pane, decides which `BackendOp` creates it:
 
 - **A tab's first pane** (`pane_index == 0`) is never created directly — it's the root pane that came back from `create_workspace` (for the first tab) or `create_tab` (for every other tab). There is no `HerdrBackend::create_first_pane` call; it already exists.
 - **Every other pane** is created by `split_pane`, splitting off the previous pane in the tab.
@@ -86,6 +92,8 @@ Everything else follows directly from that split:
 - **Path composition** (`resolve_cwd` / `combine_cwd`) layers `root → tab.cwd → pane.cwd` top-down: each level is joined onto the previous one unless it's already absolute, in which case it replaces everything above it. `..` is deliberately left alone (the shell resolves it at `cd` time); only literal `.` components are stripped (`normalize_path`).
 - **`wait_for` on a pane with no `command`** is silently ignored: `plan_workspace` only emits a `Run` (and its companion `WaitOutput`) when the pane has a `command`. A `wait_for`-only pane produces no ops of its own — there's nothing to wait for. `EngineError` has no variant for this case (it only wraps `BackendError`); the silent-drop is intentional.
 - **IDs are never invented.** Every `workspace_id`/`tab_id`/`pane_id` used by a later call is one that came back from an earlier `HerdrBackend` response. herdr's own ids get compacted as things are created/closed, so the engine only ever trusts what the backend just told it.
+
+- **Focus on a skipped workspace is workspace-level.** When an existing workspace is skipped but its config entry would have been focused, `execute_plan` calls `herdr workspace focus <id>` with the id from the pre-flight `workspace list` — no attempt is made to focus a specific pane inside it, because the name-only identity rule cannot map config panes onto live panes. Within-file duplicates emit `SkipWorkspace` without a focus op, since the id of the just-created first occurrence is not known at plan time.
 
 ### Focus
 
@@ -143,7 +151,7 @@ If you're touching path resolution, add a test for the *specific* combination yo
 
 ## `backend/`: the seam between logic and I/O
 
-`backend/mod.rs` defines `HerdrBackend` — one method per herdr operation the engine needs (`create_workspace`, `create_tab`, `split_pane`, `run`, `wait_output`, `focus_pane`, `rename_tab`), plus the `*Opts`/`*Created` structs passed to and returned from them. This trait is the entire contract between "what layout to build" (`engine.rs`) and "how to actually build it" (`backend/cli.rs`).
+`backend/mod.rs` defines `HerdrBackend` — one method per herdr operation the engine needs (`list_workspaces`, `focus_workspace`, `create_workspace`, `create_tab`, `split_pane`, `run`, `wait_output`, `focus_pane`, `rename_tab`), plus the `*Opts`/`*Created` structs and the `ExistingWorkspaces` label→id index passed to and returned from them. This trait is the entire contract between "what layout to build" (`engine.rs`) and "how to actually build it" (`backend/cli.rs`).
 
 `backend/cli.rs` implements that trait by shelling out to the `herdr` binary and parsing its JSON stdout. Internally it's split into two halves on purpose:
 

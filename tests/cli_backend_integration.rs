@@ -26,7 +26,9 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use herdr_spreader::backend::cli::CliBackend;
-use herdr_spreader::backend::{SplitOpts, TabOpts, WorkspaceOpts};
+use herdr_spreader::backend::{
+    ExistingWorkspaces, HerdrBackend, SplitOpts, TabOpts, WorkspaceOpts,
+};
 use herdr_spreader::config::{Pane, SplitDirection, SpreadFile, Tab, WaitFor, Workspace};
 use herdr_spreader::engine::{self, BackendOp, PaneHandle};
 
@@ -113,7 +115,8 @@ fn should_thread_ids_and_apply_focus_via_create_flags_across_two_workspaces_agai
     let file = build_spread_file();
     let mut backend = CliBackend::new(fake_herdr_path(), None);
 
-    engine::apply(&file, &mut backend).expect("apply against fake herdr should succeed");
+    engine::apply(&file, &ExistingWorkspaces::default(), &mut backend)
+        .expect("apply against fake herdr should succeed");
 
     let log_contents = std::fs::read_to_string(&log_path).expect("fake herdr log should exist");
     let logged_lines: Vec<&str> = log_contents.lines().collect();
@@ -178,7 +181,8 @@ fn should_focus_second_pane_when_focus_true_is_on_second_pane() {
     let file = build_spread_file_with_focus_on_second_pane();
     let mut backend = CliBackend::new(fake_herdr_path(), None);
 
-    engine::apply(&file, &mut backend).expect("apply against fake herdr should succeed");
+    engine::apply(&file, &ExistingWorkspaces::default(), &mut backend)
+        .expect("apply against fake herdr should succeed");
 
     let log_contents = std::fs::read_to_string(&log_path).expect("fake herdr log should exist");
     let logged_lines: Vec<&str> = log_contents.lines().collect();
@@ -199,7 +203,7 @@ fn should_focus_second_pane_when_focus_true_is_on_second_pane() {
 #[test]
 fn should_produce_expected_plan_for_two_workspace_fixture_before_execution() {
     let file = build_spread_file();
-    let plan = engine::plan_file(&file);
+    let plan = engine::plan_file(&file, &ExistingWorkspaces::default());
     let expected: Vec<BackendOp> = vec![
         // --- demo ---
         BackendOp::CreateWorkspace(WorkspaceOpts {
@@ -267,7 +271,7 @@ fn should_produce_expected_plan_for_two_workspace_fixture_before_execution() {
 #[test]
 fn should_produce_expected_plan_for_second_pane_focus_fixture_before_execution() {
     let file = build_spread_file_with_focus_on_second_pane();
-    let plan = engine::plan_file(&file);
+    let plan = engine::plan_file(&file, &ExistingWorkspaces::default());
     let expected: Vec<BackendOp> = vec![
         BackendOp::CreateWorkspace(WorkspaceOpts {
             label: "demo".into(),
@@ -299,4 +303,72 @@ fn should_produce_expected_plan_for_second_pane_focus_fixture_before_execution()
         },
     ];
     assert_eq!(plan, expected);
+}
+
+fn idempotent_log_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("fake_herdr_log_idempotent.txt")
+}
+
+#[test]
+fn should_skip_existing_workspaces_and_create_only_missing_ones() {
+    let _lock = FAKE_HERDR_LOCK.lock().unwrap();
+    let log_path = idempotent_log_path();
+    let _ = std::fs::remove_file(&log_path);
+
+    unsafe {
+        std::env::set_var("FAKE_HERDR_LOG", &log_path);
+        std::env::set_var("FAKE_HERDR_WORKSPACES", "demo,demo2");
+    }
+
+    // `demo` and `demo2` already exist (seeded above); only the config's
+    // third workspace, `demo3`, is new. `demo2` carries focus, so the
+    // existing `demo2` workspace is focused instead of created.
+    let file = SpreadFile {
+        workspaces: vec![
+            build_spread_file().workspaces[0].clone(),
+            build_spread_file().workspaces[1].clone(),
+            Workspace {
+                name: "demo3".to_string(),
+                tabs: vec![Tab {
+                    label: None,
+                    cwd: None,
+                    panes: vec![Pane {
+                        command: Some("htop".to_string()),
+                        ..Default::default()
+                    }],
+                }],
+                ..Default::default()
+            },
+        ],
+    };
+
+    let mut backend = CliBackend::new(fake_herdr_path(), None);
+    let existing = ExistingWorkspaces::from_list(
+        backend
+            .list_workspaces()
+            .expect("workspace list against fake herdr should succeed"),
+    );
+
+    engine::apply(&file, &existing, &mut backend).expect("apply should succeed");
+
+    let log_contents = std::fs::read_to_string(&log_path).expect("fake herdr log should exist");
+    let logged_lines: Vec<&str> = log_contents.lines().collect();
+
+    let expected_lines = vec![
+        "workspace list",
+        // `demo` is skipped but its first pane has focus: true, and `demo2`
+        // has workspace-level focus: both existing workspaces are focused in
+        // order; the last one (demo2, x1) ends up focused.
+        "workspace focus x0",
+        "workspace focus x1",
+        "workspace create --label demo3 --no-focus",
+        "pane run wA:p1 htop",
+    ];
+
+    assert_eq!(logged_lines, expected_lines);
+
+    unsafe {
+        std::env::remove_var("FAKE_HERDR_WORKSPACES");
+    }
+    let _ = std::fs::remove_file(&log_path);
 }

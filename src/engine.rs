@@ -5,7 +5,9 @@ use std::path::{Component, Path, PathBuf};
 
 use thiserror::Error;
 
-use crate::backend::{BackendError, HerdrBackend, SplitOpts, TabOpts, WorkspaceOpts};
+use crate::backend::{
+    BackendError, ExistingWorkspaces, HerdrBackend, SplitOpts, TabOpts, WorkspaceOpts,
+};
 use crate::config::{SplitDirection, SpreadFile, WaitFor, Workspace};
 
 fn resolve_cwd(
@@ -75,6 +77,12 @@ pub enum PaneHandle {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum BackendOp {
+    SkipWorkspace {
+        label: String,
+    },
+    FocusExistingWorkspace {
+        workspace_id: String,
+    },
     CreateWorkspace(WorkspaceOpts),
     RenameFirstTab {
         label: String,
@@ -127,6 +135,10 @@ pub fn execute_plan(plan: &[BackendOp], backend: &mut dyn HerdrBackend) -> Resul
     let mut ex = Executor::default();
     for op in plan {
         match op {
+            BackendOp::SkipWorkspace { .. } => {}
+            BackendOp::FocusExistingWorkspace { workspace_id } => {
+                backend.focus_workspace(workspace_id)?;
+            }
             BackendOp::CreateWorkspace(opts) => {
                 let c = backend.create_workspace(opts)?;
                 ex.workspace_id = Some(c.workspace_id);
@@ -183,8 +195,12 @@ pub fn execute_plan(plan: &[BackendOp], backend: &mut dyn HerdrBackend) -> Resul
 /// # Errors
 ///
 /// Returns [`EngineError::Backend`] if any backend operation fails.
-pub fn apply(file: &SpreadFile, backend: &mut dyn HerdrBackend) -> Result<(), EngineError> {
-    execute_plan(&plan_file(file), backend)
+pub fn apply(
+    file: &SpreadFile,
+    existing: &ExistingWorkspaces,
+    backend: &mut dyn HerdrBackend,
+) -> Result<(), EngineError> {
+    execute_plan(&plan_file(file, existing), backend)
 }
 
 #[must_use]
@@ -291,15 +307,53 @@ pub fn plan_workspace(ws: &Workspace) -> Vec<BackendOp> {
     ops
 }
 
+fn workspace_wants_focus(ws: &Workspace) -> bool {
+    ws.focus
+        || ws
+            .tabs
+            .first()
+            .and_then(|t| t.panes.first())
+            .is_some_and(|p| p.focus)
+}
+
 #[must_use]
-pub fn plan_file(file: &SpreadFile) -> Vec<BackendOp> {
-    file.workspaces.iter().flat_map(plan_workspace).collect()
+pub fn plan_file(file: &SpreadFile, existing: &ExistingWorkspaces) -> Vec<BackendOp> {
+    let mut planned: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut ops = Vec::new();
+    for ws in &file.workspaces {
+        if let Some(id) = existing.id_of(&ws.name) {
+            ops.push(BackendOp::SkipWorkspace {
+                label: ws.name.clone(),
+            });
+            if workspace_wants_focus(ws) {
+                ops.push(BackendOp::FocusExistingWorkspace {
+                    workspace_id: id.to_string(),
+                });
+            }
+        } else if !planned.insert(&ws.name) {
+            // A same-named workspace earlier in this same file was already
+            // planned; creating it again would duplicate it exactly like a
+            // second `apply` run used to.
+            ops.push(BackendOp::SkipWorkspace {
+                label: ws.name.clone(),
+            });
+        } else {
+            ops.extend(plan_workspace(ws));
+        }
+    }
+    ops
 }
 
 #[must_use]
 pub fn render_op(op: &BackendOp) -> String {
     let mut s = String::new();
     match op {
+        BackendOp::SkipWorkspace { label } => {
+            write!(s, "skip workspace {} (already exists)", shell_quote(label)).unwrap();
+        }
+        BackendOp::FocusExistingWorkspace { workspace_id } => {
+            write!(s, "workspace focus {workspace_id}").unwrap();
+        }
         BackendOp::CreateWorkspace(opts) => {
             write!(s, "workspace create --label {}", shell_quote(&opts.label)).unwrap();
             if let Some(cwd) = &opts.cwd {
@@ -384,7 +438,8 @@ mod tests {
     use std::path::PathBuf;
 
     use crate::backend::{
-        BackendError, HerdrBackend, SplitOpts, TabCreated, TabOpts, WorkspaceCreated, WorkspaceOpts,
+        BackendError, ExistingWorkspaces, HerdrBackend, SplitOpts, TabCreated, TabOpts,
+        WorkspaceCreated, WorkspaceOpts,
     };
     use crate::config::{Pane, SplitDirection, SpreadFile, Tab, WaitFor, Workspace};
     use crate::engine;
@@ -396,6 +451,17 @@ mod tests {
     }
 
     impl HerdrBackend for RecordingBackend {
+        fn list_workspaces(
+            &mut self,
+        ) -> Result<Vec<crate::backend::WorkspaceSummary>, BackendError> {
+            unreachable!("execute_plan must never call list_workspaces")
+        }
+
+        fn focus_workspace(&mut self, workspace_id: &str) -> Result<(), BackendError> {
+            self.log.push(format!("focus_workspace {workspace_id}"));
+            Ok(())
+        }
+
         fn create_workspace(
             &mut self,
             opts: &WorkspaceOpts,
@@ -645,11 +711,26 @@ mod tests {
         #[test]
         fn should_make_no_backend_calls_given_empty_workspaces_list() {
             let file = SpreadFile { workspaces: vec![] };
-            let plan = engine::plan_file(&file);
+            let plan = engine::plan_file(&file, &ExistingWorkspaces::default());
             assert!(plan.is_empty());
             let mut rec = RecordingBackend::default();
             engine::execute_plan(&plan, &mut rec).unwrap();
             assert!(rec.log.is_empty());
+        }
+
+        #[test]
+        fn should_skip_existing_workspace_with_no_backend_call_but_focus_when_requested() {
+            let plan = vec![
+                BackendOp::SkipWorkspace {
+                    label: "demo".to_string(),
+                },
+                BackendOp::FocusExistingWorkspace {
+                    workspace_id: "wZ".to_string(),
+                },
+            ];
+            let mut rec = RecordingBackend::default();
+            engine::execute_plan(&plan, &mut rec).unwrap();
+            assert_eq!(rec.log, vec!["focus_workspace wZ".to_string()]);
         }
     }
 
@@ -1268,7 +1349,7 @@ mod tests {
                 workspaces: vec![ws1, ws2],
             };
 
-            let plan = engine::plan_file(&file);
+            let plan = engine::plan_file(&file, &ExistingWorkspaces::default());
 
             assert_eq!(
                 plan,
@@ -1333,7 +1414,7 @@ mod tests {
                 workspaces: vec![ws1, ws2],
             };
 
-            let plan = engine::plan_file(&file);
+            let plan = engine::plan_file(&file, &ExistingWorkspaces::default());
 
             assert_eq!(
                 plan,
@@ -1414,7 +1495,7 @@ mod tests {
                 workspaces: vec![ws1, ws2, ws3],
             };
 
-            let plan = engine::plan_file(&file);
+            let plan = engine::plan_file(&file, &ExistingWorkspaces::default());
 
             assert_eq!(
                 plan,
@@ -1641,6 +1722,130 @@ mod tests {
                 })]
             );
         }
+
+        fn demo_workspace(name: &str) -> Workspace {
+            Workspace {
+                name: name.to_string(),
+                tabs: vec![Tab {
+                    panes: vec![Pane {
+                        command: Some("nvim".to_string()),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }
+        }
+
+        fn existing(label: &str, id: &str) -> ExistingWorkspaces {
+            ExistingWorkspaces::from_list([crate::backend::WorkspaceSummary {
+                workspace_id: id.to_string(),
+                label: label.to_string(),
+            }])
+        }
+
+        #[test]
+        fn should_skip_existing_workspace_by_label_and_focus_it_when_it_requests_focus() {
+            let mut ws = demo_workspace("demo");
+            ws.focus = true;
+            let file = SpreadFile {
+                workspaces: vec![ws],
+            };
+
+            let plan = engine::plan_file(&file, &existing("demo", "wZ"));
+
+            assert_eq!(
+                plan,
+                vec![
+                    BackendOp::SkipWorkspace {
+                        label: "demo".to_string(),
+                    },
+                    BackendOp::FocusExistingWorkspace {
+                        workspace_id: "wZ".to_string(),
+                    },
+                ]
+            );
+        }
+
+        #[test]
+        fn should_skip_existing_workspace_without_focus_op_when_it_never_requested_focus() {
+            let file = SpreadFile {
+                workspaces: vec![demo_workspace("demo")],
+            };
+
+            let plan = engine::plan_file(&file, &existing("demo", "wZ"));
+
+            assert_eq!(
+                plan,
+                vec![BackendOp::SkipWorkspace {
+                    label: "demo".to_string(),
+                }]
+            );
+        }
+
+        #[test]
+        fn should_create_only_missing_workspaces_and_keep_existing_ones_skipped() {
+            let file = SpreadFile {
+                workspaces: vec![
+                    demo_workspace("alpha"),
+                    demo_workspace("beta"),
+                    demo_workspace("gamma"),
+                ],
+            };
+
+            let plan = engine::plan_file(&file, &existing("alpha", "w1"));
+
+            assert_eq!(
+                plan,
+                vec![
+                    BackendOp::SkipWorkspace {
+                        label: "alpha".to_string(),
+                    },
+                    BackendOp::CreateWorkspace(WorkspaceOpts {
+                        label: "beta".to_string(),
+                        cwd: None,
+                        env: BTreeMap::new(),
+                        focus: false,
+                    }),
+                    BackendOp::Run {
+                        pane: PaneHandle::TabRoot(0),
+                        command: "nvim".to_string(),
+                    },
+                    BackendOp::CreateWorkspace(WorkspaceOpts {
+                        label: "gamma".to_string(),
+                        cwd: None,
+                        env: BTreeMap::new(),
+                        focus: false,
+                    }),
+                    BackendOp::Run {
+                        pane: PaneHandle::TabRoot(0),
+                        command: "nvim".to_string(),
+                    },
+                ]
+            );
+        }
+
+        #[test]
+        fn should_skip_second_occurrence_of_duplicate_label_within_one_file() {
+            let file = SpreadFile {
+                workspaces: vec![demo_workspace("demo"), demo_workspace("demo")],
+            };
+
+            let plan = engine::plan_file(&file, &ExistingWorkspaces::default());
+
+            assert_eq!(
+                plan.iter()
+                    .filter(|op| matches!(op, BackendOp::CreateWorkspace(_)))
+                    .count(),
+                1
+            );
+            assert_eq!(
+                plan.last(),
+                Some(&BackendOp::SkipWorkspace {
+                    label: "demo".to_string(),
+                })
+            );
+        }
     }
 
     mod render_tests {
@@ -1791,6 +1996,22 @@ mod tests {
                     label: "it's ok".into(),
                 }),
                 "tab rename --label 'it'\\''s ok'"
+            );
+        }
+
+        #[test]
+        fn should_render_skip_workspace_and_focus_existing_workspace_lines() {
+            assert_eq!(
+                render_op(&BackendOp::SkipWorkspace {
+                    label: "demo".into(),
+                }),
+                "skip workspace 'demo' (already exists)"
+            );
+            assert_eq!(
+                render_op(&BackendOp::FocusExistingWorkspace {
+                    workspace_id: "wZ".into(),
+                }),
+                "workspace focus wZ"
             );
         }
     }
