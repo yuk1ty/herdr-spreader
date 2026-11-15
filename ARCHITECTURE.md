@@ -7,11 +7,12 @@ This document explains how `herdr-spreader` is put together: the module boundari
 ```
 src/
 ├── main.rs        thin CLI entry point: wires config → engine → backend together
-├── cli.rs         clap argument parsing (`apply --file <path>`)
-├── config.rs       YAML → SpreadFile (a list of Workspaces), plus all path resolution (root/cwd/tilde)
+├── cli.rs         clap argument parsing (`apply --file <path>`, `export --file <path> [--force]`)
+├── config.rs       YAML → SpreadFile (a list of Workspaces), plus all path resolution (root/cwd/tilde) — the same types also serialize, so export writes exactly what apply parses
 ├── engine.rs       pure plan logic (`plan_workspace`, `plan_file` — Calculations) + `execute_plan` Action + `BackendOp`/`PaneHandle` Data types
+├── export.rs       session export: `capture_snapshot` (Action) reads the live session, `reconstruct_tab_panes`/`build_spread_file` (Calculations) turn pane rects back into a SpreadFile
 ├── backend/
-│   ├── mod.rs      the HerdrBackend trait and its Opts/Created/Error types
+│   ├── mod.rs      the HerdrBackend trait and its Opts/Created/Error types (write side) plus the read-side state types (WorkspaceState, TabState, PaneEntry, TabLayout)
 │   └── cli.rs      CliBackend: HerdrBackend implemented by spawning the herdr binary
 └── lib.rs          re-exports the above as a library, so tests/ can link against it
 ```
@@ -65,6 +66,41 @@ an actual set of herdr workspaces, with tabs, panes, commands, and focused panes
 ```
 
 Each stage is a separate module and is unit-tested independently; only the final wiring in `main.rs` is untested by design (see [Testing strategy](#testing-strategy)).
+
+## `export.rs`: rebuilding a layout from pane rects
+
+`export` is the inverse pipeline of `apply`:
+
+```
+live herdr session
+    │  export::capture_snapshot (Action): workspace list, then per workspace
+    │    tab list + pane list, then one pane layout per tab (probed with any
+    │    of that tab's panes) — HerdrBackend read methods
+    ▼
+SessionSnapshot { workspaces → tabs → panes (rect + foreground_cwd + focused) }
+    │  export::build_spread_file (pure Calculation)
+    │  — reconstruct_tab_panes rebuilds each tab's split sequence from the
+    │    pane rects alone, then maps it to config panes with id/from/ratio
+    ▼
+SpreadFile (the same type apply parses — export never emits a shape apply rejects)
+    │  export::render_yaml → serde_yaml_ng::to_string on the config types
+    ▼
+YAML file, consumed by `apply --file` with no manual editing
+```
+
+The reconstruction is the subtle part, and it exists because of two measured herdr behaviors (herdr 0.9.1):
+
+1. **The `splits` array of `pane layout` is not in execution order** (the second-executed split can appear before the first). The topology is therefore rebuilt from the pane rects alone.
+2. **A split keeps `round(ratio * extent)` cells of its source pane on the left/top** and puts the new pane in the remainder on the right/bottom; splitting the same pane again divides its *remaining* rect.
+
+From those rules, every full-length ("guillotine") cut of an exactly tiled region corresponds to exactly one split of the region's top-left pane, with `ratio = kept_extent / region_extent`. `reconstruct_tab_panes` validates the panes tile their bounding box exactly (no gaps, no overlaps — otherwise the layout is reported as unrepresentable), then recursively partitions: prefer the smallest strictly-inside vertical cut, and only failing that the smallest horizontal one.
+
+**Emission order is pre-order over the cuts.** Each cut's new pane is emitted *at the cut, before recursing into either half*. The order matters because a split's ratio is measured against the region being cut: if a deeper cut of the source pane executed first, the source pane would already be shrunk and the ratio would land on the wrong extent (emitting the source half's panes before the parent cut's pane — a post-order — breaks exactly this way on a 2×2 grid). Pre-order guarantees every split replays while its source pane still covers the whole region, and that every `from` target precedes its user; the round-trip tests in `tests/cli_backend_integration.rs` replay every exported layout through a simulator with herdr's measured semantics and assert the final rects and cwds come out identical to the snapshot.
+
+Config mapping details, all covered by unit tests: pane 0 (the root) carries no split keys; each later pane carries its ratio at full f64 precision and a `split` key only when not `right`; `from`/`id` (`p1`, `p2`, … by creation index) are emitted only when a pane splits something other than its immediate predecessor; `cwd` is the pane's `foreground_cwd` as an absolute path (an absolute pane cwd replaces the root during apply's path resolution, so no workspace `root` is written); `focus: true` lands only on the focused pane of the active tab, and on the focused workspace; tab labels are always written, even when they equal herdr's default number labels, because a rename to `"1"` is indistinguishable from a never-renamed tab.
+
+Anything that cannot be represented fails loudly via `ExportError`: non-guillotine tilings (pinwheel layouts, manually moved panes), gaps or overlaps, duplicate workspace labels (config names must be unique), and empty sessions. `export` never silently writes a different layout than the one it captured — that is the issue's core requirement.
+
 
 ## The herdr model: workspace → tab → pane
 
@@ -151,11 +187,11 @@ If you're touching path resolution, add a test for the *specific* combination yo
 
 ## `backend/`: the seam between logic and I/O
 
-`backend/mod.rs` defines `HerdrBackend` — one method per herdr operation the engine needs (`list_workspaces`, `focus_workspace`, `create_workspace`, `create_tab`, `split_pane`, `run`, `wait_output`, `focus_pane`, `rename_tab`), plus the `*Opts`/`*Created` structs and the `ExistingWorkspaces` label→id index passed to and returned from them. This trait is the entire contract between "what layout to build" (`engine.rs`) and "how to actually build it" (`backend/cli.rs`).
+`backend/mod.rs` defines `HerdrBackend` — one method per herdr operation the engine or the exporter needs: the write side (`focus_workspace`, `create_workspace`, `create_tab`, `split_pane`, `run`, `wait_output`, `focus_pane`, `rename_tab`) and the read side (`list_workspaces` returning rich `WorkspaceState`, `list_tabs`, `list_panes`, `pane_layout`), plus the `*Opts`/`*Created` structs, the read-side state types, and the `ExistingWorkspaces` label→id index passed to and returned from them. This trait is the entire contract between "what layout to build or read" (`engine.rs`, `export.rs`) and "how to actually talk to herdr" (`backend/cli.rs`).
 
 `backend/cli.rs` implements that trait by shelling out to the `herdr` binary and parsing its JSON stdout. Internally it's split into two halves on purpose:
 
-- **Pure functions** (`workspace_create_args`, `tab_create_args`, `pane_split_args`, `pane_run_args`, `wait_output_args`, `focus_args`, `rename_tab_args`, `pane_get_args`, `choose_focus_strategy`, and the matching `parse_*` functions) — no I/O, just `Opts → Vec<String>`, `Option<&str> → FocusStrategy`, and `&str (JSON) → Result<T, BackendError>`. These are unit-tested directly, without spawning anything.
+- **Pure functions** (`workspace_create_args`, `tab_create_args`, `pane_split_args`, `pane_run_args`, `wait_output_args`, `focus_args`, `rename_tab_args`, `pane_get_args`, `tab_list_args`, `pane_list_args`, `pane_layout_args`, `choose_focus_strategy`, and the matching `parse_*` functions) — no I/O, just `Opts → Vec<String>`, `Option<&str> → FocusStrategy`, and `&str (JSON) → Result<T, BackendError>`. These are unit-tested directly, without spawning anything. The read-side parsers use `#[serde(default)]` Options and fall back to list position for the ordering/`number` fields, so responses from older herdr versions still parse.
 - **`CliBackend`** itself — the thin `impl HerdrBackend` that calls those pure functions and then actually runs `std::process::Command`. It's spawned via an argv array (`Command::args`, never a shell string), so there's no shell-injection surface at the herdr-invocation boundary — the only place shell syntax appears is inside the *pane's own command string*, which is sent to that pane's interactive shell via `herdr pane run`, exactly as if the user had typed it themselves.
 
 `CliBackend::resolve_bin` picks the `herdr` binary to spawn: `$HERDR_BIN_PATH` if set (mainly for tests), otherwise `herdr` on `$PATH`.
@@ -168,4 +204,4 @@ Three layers, each targeting a different seam:
 2. **`engine.rs` unit tests** — split into two seams. First, pure `plan_workspace` / `plan_file` tests assert the produced `Vec<BackendOp>` directly: "for this YAML, exactly these backend operations happen, in this order, with these handles." Second, a tiny `RecordingBackend` (a hand-written `HerdrBackend` that records every call and returns canned ids) covers `execute_plan`'s id threading: it verifies that ids returned from earlier `create_*` / `split_pane` calls are fed back into later ops via the `HashMap<PaneHandle, String>` registry.
 3. **`tests/cli_backend_integration.rs`** — exercises the full `plan_file` → `execute_plan` → `CliBackend` → subprocess path, against `tests/fixtures/fake-herdr.sh`, a script that logs the argv it's called with and echoes back canned JSON shaped like real herdr responses. This catches integration bugs the plan-level tests can't see (e.g. an argv-building bug in `backend/cli.rs`). It also includes a plan-pinning test that records the exact `Vec<BackendOp>` produced for a sample file and fails if the plan ever changes unexpectedly.
 
-Layer 3 intentionally does *not* go through `config::resolve_paths` — it builds a `SpreadFile` directly and calls `engine::plan_file` + `engine::execute_plan` on it. `main.rs`'s wiring (config-path resolution, the `pane.get` cwd query, `resolve_paths`) is therefore covered only at the unit level, not end-to-end; keep that in mind if a bug ever turns up specifically in how `main.rs` composes those pieces rather than in any one of them.
+Layer 3 intentionally does *not* go through `config::resolve_paths` — it builds a `SpreadFile` directly and calls `engine::plan_file` + `engine::execute_plan` on it. `main.rs`'s wiring (config-path resolution, the `pane.get` cwd query, `resolve_paths`) is therefore covered only at the unit level, not end-to-end; keep that in mind if a bug ever turns up specifically in how `main.rs` composes those pieces rather than in any one of them. Export adds a fourth layer here: `capture_snapshot` runs against the fake herdr's canned read-side responses, and a layout simulator (encoding herdr's measured split semantics) replays each exported file's plan and asserts the final pane rects and cwds equal the captured snapshot's — the round-trip proof that `export` followed by `apply` reproduces the original layout.

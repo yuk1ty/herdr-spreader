@@ -57,6 +57,7 @@ $ herdr-spreader apply
 - **Explicit focus control** — mark exactly which pane should end up focused after the layout is built.
 - **Runs as a herdr plugin or a standalone CLI** — invoke it from herdr's plugin menu, or run the binary directly against any config file.
 - **Strict config validation** — unknown YAML keys are rejected at parse time instead of being silently ignored, so typos in your config surface immediately.
+- **Save-and-restore with `export`** — capture the session you already have — every workspace, tab, pane split (including branching layouts), ratio, working directory, and focus — into a YAML file that `apply` can consume directly, like Zellij's `dump-layout`. Running commands, env vars, and agent conversations are not captured; restored panes get fresh shells in the saved directories (see [Exporting a session](#exporting-a-session)).
 - **Idempotent apply** — before creating anything, `apply` lists the existing workspaces and skips every workspace in the config whose name is already taken, so running the same config twice leaves the layout unchanged instead of duplicating it (A, B, C open + a config for A, B, C, D results in A, B, C, D). A skipped workspace that requests focus gets focused in place via `herdr workspace focus`. Identity is name-only — herdr cannot observe the commands or environment of a running pane, so a same-named workspace is always treated as the same workspace, whatever its current tabs and panes look like. Each skipped workspace is reported as a warning on stderr (`warning: skipping workspace 'X' (already exists)`), so a run that re-uses existing workspaces is never silent. Duplicate names inside one config file are a config error rejected at parse time. `--dry-run` prints a `skip workspace 'X' (already exists)` line for each skipped workspace.
 - **Dry-run mode** — `--dry-run` prints the operations that *would* be performed (workspace create, tab create, pane split, run, wait…) as a human-readable plan, without invoking `herdr` or touching your session. Useful for previewing a layout before applying it, or for sanity-checking a config you just edited.
 
@@ -100,13 +101,23 @@ This works outside of a herdr session too, as long as a herdr server is already 
 ## Usage
 
 ```bash
-herdr-spreader apply [--file <path>]
+herdr-spreader apply [--file <path>] [--dry-run]
+herdr-spreader export --file <path> [--force]
 ```
+
+### `apply`
 
 | Flag | Description |
 |---|---|
 | `-f, --file <path>` | Path to a layout YAML file. If omitted, searched in `$HERDR_PLUGIN_CONFIG_DIR/` (set automatically when run as a herdr plugin), then `$XDG_CONFIG_HOME/herdr-spreader/`, then `$HOME/.config/herdr-spreader/`. Each directory is checked for `config.yaml` then `config.yml`. Run `herdr plugin config-dir herdr-spreader` to see or create the plugin config directory. |
 | `--dry-run` | Print the plan of operations that would be performed (one `BackendOp` per line) without spawning `herdr` or modifying any workspace. Path resolution still runs, so the printed paths reflect your real `root`/`cwd`/`~` expansion — only execution is skipped. |
+
+### `export`
+
+| Flag | Description |
+|---|---|
+| `-f, --file <path>` | Required. Path to write the exported session YAML to. Export prints one summary line to stderr and keeps stdout empty. |
+| `--force` | Overwrite the output file if it exists. Without it, `export` refuses to clobber an existing file — a hand-edited template stays safe by default. |
 
 ## Configuration reference
 
@@ -146,7 +157,7 @@ A layout file has four levels: the **file** (top level), **workspaces**, **tabs*
 | `env` | map of string→string | Environment variables scoped to this pane. |
 | `split` | `right` \| `down` | Direction to split from the source pane (the previous pane, or the pane named by `from`). Ignored for a tab's first pane. Default: `right`. |
 | `from` | string | `id` of an **earlier** pane in the same tab to split from, instead of the previous pane. Splitting the same pane again targets its remaining region, which is what lets layouts branch (see [Branching layouts](#branching-layouts)). Not allowed on a tab's first pane — that pane is the tab's root, not a split. |
-| `ratio` | float | Size ratio for the split (e.g. `0.3` gives the new pane 30% of the space). |
+| `ratio` | float | Size ratio for the split: the fraction of its extent the **source** pane keeps on the top/left (e.g. `0.3` leaves the source pane 30% of the space and gives the new pane the remaining 70% on the right/bottom). herdr rounds the source pane's kept share half-up to whole cells. |
 | `wait_for.match` | string | Substring to wait for in the pane's output after running `command`, before moving on to the next pane. |
 | `wait_for.timeout_ms` | integer | How long to wait for the match, in milliseconds. |
 | `focus` | boolean | Mark this pane to receive focus when it is created. When `true`, the pane's creation operation (`pane split` or `tab create`) is called with `--focus`, so the intended pane naturally receives focus during layout building. If no pane in the file has `focus: true`, the user's current focus is preserved. |
@@ -195,6 +206,27 @@ Without `from`, the `git` pane would have split the `agent` pane and ended up in
 ### Path resolution
 
 Paths compose top-down: `root` → tab `cwd` → pane `cwd`, each relative override layered on top of the last, with `..` left for the shell to resolve and `~` expanded against your home directory at every level. An absolute path at any level replaces everything above it.
+
+## Exporting a session
+
+`export` writes the session you already have to a YAML file that `apply` consumes directly, like Zellij's `dump-layout`:
+
+```bash
+herdr-spreader export --file my-session.yaml
+# later, in a fresh herdr session:
+herdr-spreader apply --file my-session.yaml
+```
+
+What is and isn't captured:
+
+- **Captured:** every workspace in number order (with focus), every tab with its label and order, each tab's full pane split topology — branching layouts included, emitted with `id`/`from` — the exact split ratios, each pane's live working directory (herdr's `foreground_cwd`, written as an absolute path), and the focused pane of the active tab.
+- **Not captured:** running commands, environment variables, and agent conversations. Restored panes get fresh shells in the saved directories.
+
+Details worth knowing:
+
+- Tab labels are always written explicitly, even when they equal herdr's default number labels (`"1"`, `"2"`, …) — a user rename to `"1"` is indistinguishable from a never-renamed tab, so always writing the label preserves both.
+- A session with two workspaces of the same label cannot map onto a config file (names must be unique), so `export` fails instead of writing a broken file.
+- If a tab's layout cannot be represented as sequential right/down splits — for example a pinwheel layout, or panes moved by hand — `export` fails with an error naming the workspace and tab rather than silently generating a different layout.
 
 ## How it works
 
