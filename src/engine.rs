@@ -481,10 +481,29 @@ mod tests {
     }
 
     impl HerdrBackend for RecordingBackend {
-        fn list_workspaces(
-            &mut self,
-        ) -> Result<Vec<crate::backend::WorkspaceSummary>, BackendError> {
+        fn list_workspaces(&mut self) -> Result<Vec<crate::backend::WorkspaceState>, BackendError> {
             unreachable!("execute_plan must never call list_workspaces")
+        }
+
+        fn list_tabs(
+            &mut self,
+            _workspace_id: &str,
+        ) -> Result<Vec<crate::backend::TabState>, BackendError> {
+            unreachable!("execute_plan must never call list_tabs")
+        }
+
+        fn list_panes(
+            &mut self,
+            _workspace_id: &str,
+        ) -> Result<Vec<crate::backend::PaneEntry>, BackendError> {
+            unreachable!("execute_plan must never call list_panes")
+        }
+
+        fn pane_layout(
+            &mut self,
+            _pane_id: &str,
+        ) -> Result<crate::backend::TabLayout, BackendError> {
+            unreachable!("execute_plan must never call pane_layout")
         }
 
         fn focus_workspace(&mut self, workspace_id: &str) -> Result<(), BackendError> {

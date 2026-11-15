@@ -27,7 +27,7 @@ use std::sync::Mutex;
 
 use herdr_spreader::backend::cli::CliBackend;
 use herdr_spreader::backend::{
-    ExistingWorkspaces, HerdrBackend, SplitOpts, TabOpts, WorkspaceOpts,
+    ExistingWorkspaces, HerdrBackend, SplitOpts, TabOpts, WorkspaceOpts, WorkspaceSummary,
 };
 use herdr_spreader::config::{Pane, SplitDirection, SpreadFile, Tab, WaitFor, Workspace};
 use herdr_spreader::engine::{self, BackendOp, PaneHandle};
@@ -423,7 +423,9 @@ fn should_skip_existing_workspaces_and_create_only_missing_ones() {
     let existing = ExistingWorkspaces::from_list(
         backend
             .list_workspaces()
-            .expect("workspace list against fake herdr should succeed"),
+            .expect("workspace list against fake herdr should succeed")
+            .into_iter()
+            .map(WorkspaceSummary::from),
     );
 
     engine::apply(&file, &existing, &mut backend).expect("apply should succeed");
