@@ -8,6 +8,7 @@ use herdr_spreader::backend::{ExistingWorkspaces, HerdrBackend, WorkspaceSummary
 use herdr_spreader::cli::{Cli, Command};
 use herdr_spreader::config::{read_config, resolve_config_path, resolve_paths};
 use herdr_spreader::engine;
+use herdr_spreader::export;
 use herdr_spreader::validate;
 
 fn main() -> anyhow::Result<()> {
@@ -60,6 +61,32 @@ fn main() -> anyhow::Result<()> {
 
             engine::execute_plan(&plan, &mut backend)?;
 
+            Ok(())
+        }
+        Command::Export { file, force } => {
+            if file.exists() && !force {
+                anyhow::bail!(
+                    "refusing to overwrite existing file {} (use --force to overwrite)",
+                    file.display()
+                );
+            }
+
+            let bin = CliBackend::resolve_bin(&env);
+            let socket_path = env.get("HERDR_SOCKET_PATH").map(PathBuf::from);
+            let mut backend = CliBackend::new(bin, socket_path);
+
+            let snapshot = export::capture_snapshot(&mut backend)?;
+            let spread_file = export::build_spread_file(&snapshot)?;
+            let yaml = export::render_yaml(&spread_file)?;
+            std::fs::write(&file, yaml)?;
+
+            let tab_count: usize = snapshot.workspaces.iter().map(|ws| ws.tabs.len()).sum();
+            eprintln!(
+                "exported {} workspaces ({} tabs) to {}",
+                snapshot.workspaces.len(),
+                tab_count,
+                file.display()
+            );
             Ok(())
         }
     }

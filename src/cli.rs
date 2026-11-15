@@ -20,6 +20,16 @@ pub enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Write the current herdr session (workspaces, tabs, pane split
+    /// topology, pane working directories, and focus) to a YAML file that
+    /// `apply` can consume.
+    Export {
+        #[arg(long, short)]
+        file: PathBuf,
+        /// Overwrite the output file if it already exists.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[cfg(test)]
@@ -83,6 +93,50 @@ mod tests {
                 file: None,
                 dry_run: false
             }
+        );
+    }
+
+    #[test]
+    fn should_parse_export_subcommand_with_long_and_short_file_flags() {
+        let cli = Cli::try_parse_from(["herdr-spreader", "export", "--file", "dev.yaml"]).unwrap();
+        assert_eq!(
+            cli.command,
+            Command::Export {
+                file: PathBuf::from("dev.yaml"),
+                force: false,
+            }
+        );
+
+        let cli = Cli::try_parse_from(["herdr-spreader", "export", "-f", "dev.yaml"]).unwrap();
+        assert_eq!(
+            cli.command,
+            Command::Export {
+                file: PathBuf::from("dev.yaml"),
+                force: false,
+            }
+        );
+    }
+
+    #[test]
+    fn should_parse_export_subcommand_with_force_flag() {
+        let cli =
+            Cli::try_parse_from(["herdr-spreader", "export", "--file", "dev.yaml", "--force"])
+                .unwrap();
+        assert_eq!(
+            cli.command,
+            Command::Export {
+                file: PathBuf::from("dev.yaml"),
+                force: true,
+            }
+        );
+    }
+
+    #[test]
+    fn should_reject_export_subcommand_when_no_file_is_given() {
+        let result = Cli::try_parse_from(["herdr-spreader", "export"]);
+        assert!(
+            result.is_err(),
+            "export without --file should not parse: the output path is required"
         );
     }
 
