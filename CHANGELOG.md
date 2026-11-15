@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(engine)* skip workspaces that already exist by name, making `apply` idempotent: running the same config twice no longer duplicates workspaces. Skipped workspaces that request focus are focused in place via `herdr workspace focus`.
+- *(cli)* warn on stderr for every skipped workspace so a run that re-uses existing workspaces is never silent.
+
+### Changed
+
+- *(engine)* `plan_file`/`apply` now take an `ExistingWorkspaces` index; `main.rs` builds it from `herdr workspace list` before planning, so a conflicting pre-flight state is detected before anything is created.
+
 ## [0.2.2](https://github.com/yuk1ty/herdr-spreader/compare/v0.2.1...v0.2.2) - 2026-11-14
 
 ### Other
