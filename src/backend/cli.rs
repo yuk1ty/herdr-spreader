@@ -6,6 +6,7 @@ use serde::Deserialize;
 
 use super::{
     BackendError, HerdrBackend, SplitOpts, TabCreated, TabOpts, WorkspaceCreated, WorkspaceOpts,
+    WorkspaceSummary,
 };
 use crate::config::{SplitDirection, WaitFor};
 
@@ -206,6 +207,41 @@ pub(crate) fn parse_pane_split(json: &str) -> Result<String, BackendError> {
     Ok(body.pane.pane_id)
 }
 
+pub(crate) fn workspace_list_args() -> Vec<String> {
+    vec!["workspace".to_string(), "list".to_string()]
+}
+
+pub(crate) fn workspace_focus_args(workspace_id: &str) -> Vec<String> {
+    vec![
+        "workspace".to_string(),
+        "focus".to_string(),
+        workspace_id.to_string(),
+    ]
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkspaceListBody {
+    workspaces: Vec<WorkspaceSummaryBody>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkspaceSummaryBody {
+    workspace_id: String,
+    label: String,
+}
+
+pub(crate) fn parse_workspace_list(json: &str) -> Result<Vec<WorkspaceSummary>, BackendError> {
+    let body: WorkspaceListBody = parse_envelope(json)?;
+    Ok(body
+        .workspaces
+        .into_iter()
+        .map(|w| WorkspaceSummary {
+            workspace_id: w.workspace_id,
+            label: w.label,
+        })
+        .collect())
+}
+
 pub(crate) fn pane_get_args(pane_id: &str) -> Vec<String> {
     vec!["pane".to_string(), "get".to_string(), pane_id.to_string()]
 }
@@ -376,6 +412,16 @@ fn focus_pane_via_socket(_pane_id: &str, _socket_path: &Path) -> Result<(), Back
 }
 
 impl HerdrBackend for CliBackend {
+    fn list_workspaces(&mut self) -> Result<Vec<WorkspaceSummary>, BackendError> {
+        let stdout = self.exec(&workspace_list_args())?;
+        parse_workspace_list(&stdout)
+    }
+
+    fn focus_workspace(&mut self, workspace_id: &str) -> Result<(), BackendError> {
+        self.exec(&workspace_focus_args(workspace_id))?;
+        Ok(())
+    }
+
     fn create_workspace(&mut self, opts: &WorkspaceOpts) -> Result<WorkspaceCreated, BackendError> {
         let stdout = self.exec(&workspace_create_args(opts))?;
         parse_workspace_created(&stdout)
@@ -560,6 +606,39 @@ mod tests {
         assert_eq!(
             args,
             vec!["pane", "focus", "--pane", "wA:p3", "--direction", "left"]
+        );
+    }
+
+    #[test]
+    fn should_build_workspace_list_argv() {
+        assert_eq!(workspace_list_args(), vec!["workspace", "list"]);
+    }
+
+    #[test]
+    fn should_build_workspace_focus_argv_with_workspace_id() {
+        assert_eq!(workspace_focus_args("wZ"), vec!["workspace", "focus", "wZ"]);
+    }
+
+    #[test]
+    fn should_extract_labels_and_ids_when_parsing_workspace_list_response() {
+        let json = r#"{"id":"cli:workspace:list","result":{"type":"workspace_list","workspaces":[
+          {"workspace_id":"w1","label":"demo","tab_count":1,"pane_count":2},
+          {"workspace_id":"w3","label":"chezmoi","tab_count":3,"pane_count":5}]}}"#;
+
+        let list = parse_workspace_list(json).unwrap();
+
+        assert_eq!(
+            list,
+            vec![
+                WorkspaceSummary {
+                    workspace_id: "w1".to_string(),
+                    label: "demo".to_string(),
+                },
+                WorkspaceSummary {
+                    workspace_id: "w3".to_string(),
+                    label: "chezmoi".to_string(),
+                },
+            ]
         );
     }
 

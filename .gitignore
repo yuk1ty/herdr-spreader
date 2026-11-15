@@ -1,1 +1,7 @@
 /target
+.agents
+.opencode
+.claude
+.codex
+.cursor
+skills-lock.json

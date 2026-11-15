@@ -19,18 +19,43 @@ fi
 
 case "$1" in
   workspace)
-    # Argv logging above runs before this branch, so by the Nth
-    # `workspace create` call the log already contains N matching lines:
-    # the 1st call sees count=1 (-> wA), the 2nd sees count=2 (-> wB).
-    count=$(grep -c '^workspace create' "$FAKE_HERDR_LOG" 2>/dev/null || echo 1)
-    if [ "$count" -ge 2 ]; then
-      ws=wB
-    else
-      ws=wA
-    fi
-    cat <<JSON
+    case "$2" in
+      list)
+        # Seed via $FAKE_HERDR_WORKSPACES: comma-separated labels. Ids are
+        # generated as x0, x1, ... in order.
+        items=""
+        n=0
+        IFS=','
+        for label in ${FAKE_HERDR_WORKSPACES:-}; do
+          if [ -n "$label" ]; then
+            if [ -n "$items" ]; then items="$items,"; fi
+            items="$items{\"workspace_id\":\"x$n\",\"label\":\"$label\"}"
+          fi
+          n=$((n + 1))
+        done
+        unset IFS
+        cat <<JSON
+{"id":"cli:workspace:list","result":{"type":"workspace_list","workspaces":[$items]}}
+JSON
+        ;;
+      focus)
+        # workspace focus discards stdout; nothing to emit.
+        ;;
+      create)
+        # Argv logging above runs before this branch, so by the Nth
+        # `workspace create` call the log already contains N matching lines:
+        # the 1st call sees count=1 (-> wA), the 2nd sees count=2 (-> wB).
+        count=$(grep -c '^workspace create' "$FAKE_HERDR_LOG" 2>/dev/null || echo 1)
+        if [ "$count" -ge 2 ]; then
+          ws=wB
+        else
+          ws=wA
+        fi
+        cat <<JSON
 {"result":{"type":"workspace_created","workspace":{"workspace_id":"$ws","label":"demo","active_tab_id":"$ws:t1"},"tab":{"tab_id":"$ws:t1","label":"1"},"root_pane":{"pane_id":"$ws:p1","tab_id":"$ws:t1","workspace_id":"$ws","cwd":"/tmp"}}}
 JSON
+        ;;
+    esac
     ;;
   tab)
     case "$2" in

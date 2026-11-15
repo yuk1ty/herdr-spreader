@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 use thiserror::Error;
@@ -20,6 +20,40 @@ pub struct WorkspaceCreated {
     pub workspace_id: String,
     pub tab_id: String,
     pub root_pane_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceSummary {
+    pub workspace_id: String,
+    pub label: String,
+}
+
+/// Index of the workspaces that already exist, by label.
+///
+/// Identity is label-only: herdr cannot observe the commands or environment
+/// of a running pane, so any deeper comparison would be guesswork. The id
+/// kept per label is what `workspace focus` needs when a skipped workspace
+/// still requests focus.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ExistingWorkspaces {
+    ids_by_label: HashMap<String, String>,
+}
+
+impl ExistingWorkspaces {
+    #[must_use]
+    pub fn from_list(list: impl IntoIterator<Item = WorkspaceSummary>) -> Self {
+        Self {
+            ids_by_label: list
+                .into_iter()
+                .map(|w| (w.label, w.workspace_id))
+                .collect(),
+        }
+    }
+
+    #[must_use]
+    pub fn id_of(&self, label: &str) -> Option<&str> {
+        self.ids_by_label.get(label).map(String::as_str)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -53,6 +87,20 @@ pub enum BackendError {
 }
 
 pub trait HerdrBackend {
+    /// List the workspaces that currently exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BackendError`] if the underlying command fails.
+    fn list_workspaces(&mut self) -> Result<Vec<WorkspaceSummary>, BackendError>;
+
+    /// Focus an existing workspace.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BackendError`] if the underlying command fails.
+    fn focus_workspace(&mut self, workspace_id: &str) -> Result<(), BackendError>;
+
     /// Create a new workspace.
     ///
     /// # Errors
