@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/yuk1ty/herdr-spreader/compare/v0.2.2...v0.3.0) - 2026-11-15
+
+### Added
+
+- *(cli)* warn on stderr for each skipped workspace
+- *(engine)* skip existing workspaces by name to make apply idempotent
+
+### Other
+
+- Merge remote-tracking branch 'origin/main' into feat/idempotent-apply
+- ignore coding agents related files
+- add rust analyzer
+
 ### Added
 
 - *(engine)* skip workspaces that already exist by name, making `apply` idempotent: running the same config twice no longer duplicates workspaces. Skipped workspaces that request focus are focused in place via `herdr workspace focus`.
