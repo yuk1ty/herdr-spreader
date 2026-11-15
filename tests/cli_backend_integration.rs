@@ -254,7 +254,8 @@ fn should_split_both_from_panes_off_the_tab_root_pane_against_fake_herdr() {
     let file = build_spread_file_with_branching_from();
     let mut backend = CliBackend::new(fake_herdr_path(), None);
 
-    engine::apply(&file, &mut backend).expect("apply against fake herdr should succeed");
+    engine::apply(&file, &ExistingWorkspaces::default(), &mut backend)
+        .expect("apply against fake herdr should succeed");
 
     let log_contents = std::fs::read_to_string(&log_path).expect("fake herdr log should exist");
     let logged_lines: Vec<&str> = log_contents.lines().collect();
