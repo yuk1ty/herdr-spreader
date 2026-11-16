@@ -51,6 +51,7 @@ pub struct Tab {
 #[derive(Debug, Default, Clone, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Pane {
+    pub id: Option<String>,
     pub command: Option<String>,
     #[serde(default)]
     pub cwd: Option<PathBuf>,
@@ -58,6 +59,7 @@ pub struct Pane {
     pub env: BTreeMap<String, String>,
     #[serde(default)]
     pub split: SplitDirection,
+    pub from: Option<String>,
     pub ratio: Option<f64>,
     pub wait_for: Option<WaitFor>,
     #[serde(default)]
@@ -196,6 +198,7 @@ fn resolve_workspace_paths(
                     .panes
                     .iter()
                     .map(|pane| Pane {
+                        id: pane.id.clone(),
                         command: pane.command.clone(),
                         cwd: pane
                             .cwd
@@ -203,6 +206,7 @@ fn resolve_workspace_paths(
                             .map(|pane_cwd| expand_tilde(pane_cwd, env)),
                         env: pane.env.clone(),
                         split: pane.split,
+                        from: pane.from.clone(),
                         ratio: pane.ratio,
                         wait_for: pane.wait_for.clone(),
                         focus: pane.focus,
@@ -363,6 +367,51 @@ workspaces:
 
         let err = result.unwrap_err();
         assert!(err.to_string().contains("left"));
+    }
+
+    #[test]
+    fn should_parse_pane_id_and_from_given_branching_layout_yaml() {
+        let yaml = r"
+workspaces:
+  - name: demo
+    tabs:
+      - panes:
+          - id: editor
+            command: nvim
+          - id: agent
+            from: editor
+            split: right
+            command: claude
+          - from: editor
+            split: down
+            command: lazygit
+";
+
+        let file = SpreadFile::from_str(yaml).unwrap();
+
+        let panes = &file.workspaces[0].tabs[0].panes;
+        assert_eq!(panes[0].id, Some("editor".to_string()));
+        assert_eq!(panes[0].from, None);
+        assert_eq!(panes[1].id, Some("agent".to_string()));
+        assert_eq!(panes[1].from, Some("editor".to_string()));
+        assert_eq!(panes[2].id, None);
+        assert_eq!(panes[2].from, Some("editor".to_string()));
+    }
+
+    #[test]
+    fn should_default_pane_id_and_from_to_none_when_omitted() {
+        let yaml = r"
+workspaces:
+  - name: demo
+    tabs:
+      - panes:
+          - command: nvim
+";
+
+        let file = SpreadFile::from_str(yaml).unwrap();
+
+        assert_eq!(file.workspaces[0].tabs[0].panes[0].id, None);
+        assert_eq!(file.workspaces[0].tabs[0].panes[0].from, None);
     }
 
     #[test]
