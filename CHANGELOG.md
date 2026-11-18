@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/yuk1ty/herdr-spreader/compare/v0.3.0...v0.4.0) - 2026-11-18
+
+### Added
+
+- *(cli)* add export subcommand writing the session layout to YAML
+- *(export)* reconstruct split topology from pane rects into a spread file
+- *(config)* serialize layouts so export can emit apply-compatible YAML
+- *(backend)* read-side herdr queries for session export
+- branch pane splits off any earlier pane via `id`/`from`
+
+### Other
+
+- document export and correct the split ratio semantics
+- *(export)* round-trip proof via layout simulation
+- fix stale engine::apply call after idempotent-apply signature change
+- Merge branch 'main' into feat/pane-from-branching
+
 ### Added
 
 - *(config)* optional pane `id` and `from` keys, so a pane can split off any earlier pane in its tab instead of only chaining from the previous one — branching layouts like a full-height sidebar or a 2×2 grid become expressible
