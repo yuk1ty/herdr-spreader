@@ -28,6 +28,65 @@ pub struct WorkspaceSummary {
     pub label: String,
 }
 
+/// One workspace of the live session, as `herdr workspace list` reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceState {
+    pub workspace_id: String,
+    pub label: String,
+    pub number: u32,
+    pub focused: bool,
+    pub active_tab_id: Option<String>,
+}
+
+impl From<WorkspaceState> for WorkspaceSummary {
+    fn from(state: WorkspaceState) -> Self {
+        Self {
+            workspace_id: state.workspace_id,
+            label: state.label,
+        }
+    }
+}
+
+/// One tab of the live session, as `herdr tab list` reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TabState {
+    pub tab_id: String,
+    pub label: String,
+    pub number: u32,
+    pub focused: bool,
+}
+
+/// One pane of the live session, as `herdr pane list` reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneEntry {
+    pub pane_id: String,
+    pub tab_id: String,
+    pub foreground_cwd: Option<PathBuf>,
+}
+
+/// A cell rectangle within a tab, in terminal cells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rect {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LayoutPane {
+    pub pane_id: String,
+    pub rect: Rect,
+}
+
+/// The pane geometry of one tab, as `herdr pane layout` reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TabLayout {
+    pub area: Rect,
+    pub panes: Vec<LayoutPane>,
+    pub focused_pane_id: Option<String>,
+}
+
 /// Index of the workspaces that already exist, by label.
 ///
 /// Identity is label-only: herdr cannot observe the commands or environment
@@ -87,12 +146,33 @@ pub enum BackendError {
 }
 
 pub trait HerdrBackend {
-    /// List the workspaces that currently exist.
+    /// List the workspaces that currently exist, with their live state.
     ///
     /// # Errors
     ///
     /// Returns [`BackendError`] if the underlying command fails.
-    fn list_workspaces(&mut self) -> Result<Vec<WorkspaceSummary>, BackendError>;
+    fn list_workspaces(&mut self) -> Result<Vec<WorkspaceState>, BackendError>;
+
+    /// List the tabs of one workspace, in their live order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BackendError`] if the underlying command fails.
+    fn list_tabs(&mut self, workspace_id: &str) -> Result<Vec<TabState>, BackendError>;
+
+    /// List the panes of one workspace with their current shell directories.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BackendError`] if the underlying command fails.
+    fn list_panes(&mut self, workspace_id: &str) -> Result<Vec<PaneEntry>, BackendError>;
+
+    /// Read the pane geometry of the tab that contains `pane_id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BackendError`] if the underlying command fails.
+    fn pane_layout(&mut self, pane_id: &str) -> Result<TabLayout, BackendError>;
 
     /// Focus an existing workspace.
     ///

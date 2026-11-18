@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use super::{
-    BackendError, HerdrBackend, SplitOpts, TabCreated, TabOpts, WorkspaceCreated, WorkspaceOpts,
-    WorkspaceSummary,
+    BackendError, HerdrBackend, LayoutPane, PaneEntry, Rect, SplitOpts, TabCreated, TabLayout,
+    TabOpts, TabState, WorkspaceCreated, WorkspaceOpts, WorkspaceState,
 };
 use crate::config::{SplitDirection, WaitFor};
 
@@ -221,25 +221,185 @@ pub(crate) fn workspace_focus_args(workspace_id: &str) -> Vec<String> {
 
 #[derive(Debug, Deserialize)]
 struct WorkspaceListBody {
-    workspaces: Vec<WorkspaceSummaryBody>,
+    workspaces: Vec<WorkspaceStateBody>,
 }
 
 #[derive(Debug, Deserialize)]
-struct WorkspaceSummaryBody {
+struct WorkspaceStateBody {
     workspace_id: String,
     label: String,
+    #[serde(default)]
+    number: Option<u32>,
+    #[serde(default)]
+    focused: Option<bool>,
+    #[serde(default)]
+    active_tab_id: Option<String>,
 }
 
-pub(crate) fn parse_workspace_list(json: &str) -> Result<Vec<WorkspaceSummary>, BackendError> {
+/// Fill the fields older herdr responses omit: number falls back to the
+/// position in the list, focus to false, and the active tab to none.
+fn workspace_state_fallbacks(body: WorkspaceStateBody, index: usize) -> WorkspaceState {
+    WorkspaceState {
+        workspace_id: body.workspace_id,
+        label: body.label,
+        number: body
+            .number
+            .or_else(|| u32::try_from(index + 1).ok())
+            .unwrap_or(u32::MAX),
+        focused: body.focused.unwrap_or(false),
+        active_tab_id: body.active_tab_id,
+    }
+}
+
+pub(crate) fn parse_workspace_list(json: &str) -> Result<Vec<WorkspaceState>, BackendError> {
     let body: WorkspaceListBody = parse_envelope(json)?;
     Ok(body
         .workspaces
         .into_iter()
-        .map(|w| WorkspaceSummary {
-            workspace_id: w.workspace_id,
-            label: w.label,
+        .enumerate()
+        .map(|(index, w)| workspace_state_fallbacks(w, index))
+        .collect())
+}
+
+pub(crate) fn tab_list_args(workspace_id: &str) -> Vec<String> {
+    vec![
+        "tab".to_string(),
+        "list".to_string(),
+        "--workspace".to_string(),
+        workspace_id.to_string(),
+    ]
+}
+
+pub(crate) fn pane_list_args(workspace_id: &str) -> Vec<String> {
+    vec![
+        "pane".to_string(),
+        "list".to_string(),
+        "--workspace".to_string(),
+        workspace_id.to_string(),
+    ]
+}
+
+pub(crate) fn pane_layout_args(pane_id: &str) -> Vec<String> {
+    vec![
+        "pane".to_string(),
+        "layout".to_string(),
+        "--pane".to_string(),
+        pane_id.to_string(),
+    ]
+}
+
+#[derive(Debug, Deserialize)]
+struct TabListBody {
+    tabs: Vec<TabStateBody>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TabStateBody {
+    tab_id: String,
+    label: String,
+    #[serde(default)]
+    number: Option<u32>,
+    #[serde(default)]
+    focused: Option<bool>,
+}
+
+pub(crate) fn parse_tab_list(json: &str) -> Result<Vec<TabState>, BackendError> {
+    let body: TabListBody = parse_envelope(json)?;
+    Ok(body
+        .tabs
+        .into_iter()
+        .enumerate()
+        .map(|(index, t)| TabState {
+            tab_id: t.tab_id,
+            label: t.label,
+            number: t
+                .number
+                .or_else(|| u32::try_from(index + 1).ok())
+                .unwrap_or(u32::MAX),
+            focused: t.focused.unwrap_or(false),
         })
         .collect())
+}
+
+#[derive(Debug, Deserialize)]
+struct PaneListBody {
+    panes: Vec<PaneEntryBody>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PaneEntryBody {
+    pane_id: String,
+    tab_id: String,
+    #[serde(default)]
+    foreground_cwd: Option<String>,
+}
+
+pub(crate) fn parse_pane_list(json: &str) -> Result<Vec<PaneEntry>, BackendError> {
+    let body: PaneListBody = parse_envelope(json)?;
+    Ok(body
+        .panes
+        .into_iter()
+        .map(|p| PaneEntry {
+            pane_id: p.pane_id,
+            tab_id: p.tab_id,
+            foreground_cwd: p.foreground_cwd.map(PathBuf::from),
+        })
+        .collect())
+}
+
+#[derive(Debug, Deserialize)]
+struct TabLayoutBody {
+    layout: TabLayoutInner,
+}
+
+#[derive(Debug, Deserialize)]
+struct TabLayoutInner {
+    area: RectBody,
+    panes: Vec<LayoutPaneBody>,
+    #[serde(default)]
+    focused_pane_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LayoutPaneBody {
+    pane_id: String,
+    rect: RectBody,
+}
+
+#[derive(Debug, Deserialize)]
+struct RectBody {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+}
+
+impl From<RectBody> for Rect {
+    fn from(body: RectBody) -> Self {
+        Rect {
+            x: body.x,
+            y: body.y,
+            width: body.width,
+            height: body.height,
+        }
+    }
+}
+
+pub(crate) fn parse_pane_layout(json: &str) -> Result<TabLayout, BackendError> {
+    let body: TabLayoutBody = parse_envelope(json)?;
+    Ok(TabLayout {
+        area: body.layout.area.into(),
+        panes: body
+            .layout
+            .panes
+            .into_iter()
+            .map(|p| LayoutPane {
+                pane_id: p.pane_id,
+                rect: p.rect.into(),
+            })
+            .collect(),
+        focused_pane_id: body.layout.focused_pane_id,
+    })
 }
 
 pub(crate) fn pane_get_args(pane_id: &str) -> Vec<String> {
@@ -412,9 +572,24 @@ fn focus_pane_via_socket(_pane_id: &str, _socket_path: &Path) -> Result<(), Back
 }
 
 impl HerdrBackend for CliBackend {
-    fn list_workspaces(&mut self) -> Result<Vec<WorkspaceSummary>, BackendError> {
+    fn list_workspaces(&mut self) -> Result<Vec<WorkspaceState>, BackendError> {
         let stdout = self.exec(&workspace_list_args())?;
         parse_workspace_list(&stdout)
+    }
+
+    fn list_tabs(&mut self, workspace_id: &str) -> Result<Vec<TabState>, BackendError> {
+        let stdout = self.exec(&tab_list_args(workspace_id))?;
+        parse_tab_list(&stdout)
+    }
+
+    fn list_panes(&mut self, workspace_id: &str) -> Result<Vec<PaneEntry>, BackendError> {
+        let stdout = self.exec(&pane_list_args(workspace_id))?;
+        parse_pane_list(&stdout)
+    }
+
+    fn pane_layout(&mut self, pane_id: &str) -> Result<TabLayout, BackendError> {
+        let stdout = self.exec(&pane_layout_args(pane_id))?;
+        parse_pane_layout(&stdout)
     }
 
     fn focus_workspace(&mut self, workspace_id: &str) -> Result<(), BackendError> {
@@ -620,25 +795,181 @@ mod tests {
     }
 
     #[test]
-    fn should_extract_labels_and_ids_when_parsing_workspace_list_response() {
+    fn should_extract_labels_ids_and_state_when_parsing_workspace_list_response() {
         let json = r#"{"id":"cli:workspace:list","result":{"type":"workspace_list","workspaces":[
-          {"workspace_id":"w1","label":"demo","tab_count":1,"pane_count":2},
-          {"workspace_id":"w3","label":"chezmoi","tab_count":3,"pane_count":5}]}}"#;
+          {"workspace_id":"w1","label":"demo","number":1,"focused":true,"active_tab_id":"w1:t2"},
+          {"workspace_id":"w3","label":"chezmoi","number":2,"focused":false,"active_tab_id":null}]}}"#;
 
         let list = parse_workspace_list(json).unwrap();
 
         assert_eq!(
             list,
             vec![
-                WorkspaceSummary {
+                WorkspaceState {
                     workspace_id: "w1".to_string(),
                     label: "demo".to_string(),
+                    number: 1,
+                    focused: true,
+                    active_tab_id: Some("w1:t2".to_string()),
                 },
-                WorkspaceSummary {
+                WorkspaceState {
                     workspace_id: "w3".to_string(),
                     label: "chezmoi".to_string(),
+                    number: 2,
+                    focused: false,
+                    active_tab_id: None,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn should_fall_back_to_position_and_unfocused_when_older_workspace_list_response_omits_state() {
+        let json = r#"{"id":"cli:workspace:list","result":{"type":"workspace_list","workspaces":[
+          {"workspace_id":"w1","label":"demo","tab_count":1,"pane_count":2},
+          {"workspace_id":"w3","label":"chezmoi","tab_count":3,"pane_count":5}]}}"#;
+
+        let list = parse_workspace_list(json).unwrap();
+
+        assert_eq!(list[0].number, 1);
+        assert!(!list[0].focused);
+        assert_eq!(list[0].active_tab_id, None);
+        assert_eq!(list[1].number, 2);
+    }
+
+    #[test]
+    fn should_build_tab_list_argv_with_workspace_id() {
+        assert_eq!(
+            tab_list_args("wA"),
+            vec!["tab", "list", "--workspace", "wA"]
+        );
+    }
+
+    #[test]
+    fn should_build_pane_list_argv_with_workspace_id() {
+        assert_eq!(
+            pane_list_args("wA"),
+            vec!["pane", "list", "--workspace", "wA"]
+        );
+    }
+
+    #[test]
+    fn should_build_pane_layout_argv_with_pane_id() {
+        assert_eq!(
+            pane_layout_args("wA:p1"),
+            vec!["pane", "layout", "--pane", "wA:p1"]
+        );
+    }
+
+    #[test]
+    fn should_extract_tabs_when_parsing_tab_list_response() {
+        let json = r#"{"result":{"type":"tab_list","tabs":[
+          {"tab_id":"wA:t1","workspace_id":"wA","label":"1","number":1,"focused":true,"pane_count":2},
+          {"tab_id":"wA:t2","workspace_id":"wA","label":"editor","number":2,"focused":false,"pane_count":1}]}}"#;
+
+        let tabs = parse_tab_list(json).unwrap();
+
+        assert_eq!(
+            tabs,
+            vec![
+                TabState {
+                    tab_id: "wA:t1".to_string(),
+                    label: "1".to_string(),
+                    number: 1,
+                    focused: true,
+                },
+                TabState {
+                    tab_id: "wA:t2".to_string(),
+                    label: "editor".to_string(),
+                    number: 2,
+                    focused: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn should_fall_back_to_position_when_tab_list_response_omits_number() {
+        let json = r#"{"result":{"type":"tab_list","tabs":[
+          {"tab_id":"wA:t1","workspace_id":"wA","label":"1"},
+          {"tab_id":"wA:t2","workspace_id":"wA","label":"editor"}]}}"#;
+
+        let tabs = parse_tab_list(json).unwrap();
+
+        assert_eq!(tabs[0].number, 1);
+        assert_eq!(tabs[1].number, 2);
+        assert!(!tabs[0].focused);
+    }
+
+    #[test]
+    fn should_extract_panes_when_parsing_pane_list_response() {
+        let json = r#"{"result":{"type":"pane_list","panes":[
+          {"pane_id":"wA:p1","tab_id":"wA:t1","cwd":"/tmp","foreground_cwd":"/home/demo/project"},
+          {"pane_id":"wA:p2","tab_id":"wA:t2","cwd":"/tmp"}]}}"#;
+
+        let panes = parse_pane_list(json).unwrap();
+
+        assert_eq!(
+            panes,
+            vec![
+                PaneEntry {
+                    pane_id: "wA:p1".to_string(),
+                    tab_id: "wA:t1".to_string(),
+                    foreground_cwd: Some(PathBuf::from("/home/demo/project")),
+                },
+                PaneEntry {
+                    pane_id: "wA:p2".to_string(),
+                    tab_id: "wA:t2".to_string(),
+                    foreground_cwd: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn should_extract_area_panes_and_focus_when_parsing_pane_layout_response() {
+        let json = r#"{"result":{"type":"pane_layout","layout":{
+          "area":{"x":0,"y":0,"width":396,"height":73},
+          "panes":[
+            {"pane_id":"wA:p1","rect":{"x":0,"y":0,"width":119,"height":73},"focused":false},
+            {"pane_id":"wA:p2","rect":{"x":119,"y":0,"width":277,"height":73},"focused":true}],
+          "focused_pane_id":"wA:p2",
+          "tab_id":"wA:t1","workspace_id":"wA","zoomed":false,
+          "splits":[{"pane_id":"wA:p2","direction":"right","ratio":0.3005}]}}}"#;
+
+        let layout = parse_pane_layout(json).unwrap();
+
+        assert_eq!(
+            layout,
+            TabLayout {
+                area: Rect {
+                    x: 0,
+                    y: 0,
+                    width: 396,
+                    height: 73
+                },
+                panes: vec![
+                    LayoutPane {
+                        pane_id: "wA:p1".to_string(),
+                        rect: Rect {
+                            x: 0,
+                            y: 0,
+                            width: 119,
+                            height: 73
+                        },
+                    },
+                    LayoutPane {
+                        pane_id: "wA:p2".to_string(),
+                        rect: Rect {
+                            x: 119,
+                            y: 0,
+                            width: 277,
+                            height: 73
+                        },
+                    },
+                ],
+                focused_pane_id: Some("wA:p2".to_string()),
+            }
         );
     }
 

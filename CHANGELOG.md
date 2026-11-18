@@ -10,6 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - *(config)* optional pane `id` and `from` keys, so a pane can split off any earlier pane in its tab instead of only chaining from the previous one — branching layouts like a full-height sidebar or a 2×2 grid become expressible
+- *(cli)* `herdr-spreader export --file <path> [--force]`: capture the entire current herdr session — workspaces in order, tabs with labels and order, each tab's full pane split topology (branching layouts emitted with `id`/`from`) and exact ratios, per-pane working directories, and focus — as a YAML file `apply` consumes directly. Running commands, env vars, and agent conversations are not captured. Fails with a clear error on layouts that cannot be represented (e.g. pinwheel layouts or moved panes) or on duplicate workspace labels, instead of silently writing a different layout; refuses to overwrite an existing file without `--force`
+- *(backend)* read-side herdr queries (`WorkspaceState` from `workspace list`, `tab list`, `pane list`, `pane layout`) with position-based fallbacks for older responses
+- *(config)* spread files can now be serialized, so export and apply share one file format end to end
+
+### Fixed
+
+- *(docs)* correct the README's `ratio` description: the ratio is the fraction of its extent the **source** pane keeps on the top/left (measured on herdr 0.9.1), not the new pane's share
 
 ## [0.3.0](https://github.com/yuk1ty/herdr-spreader/compare/v0.2.2...v0.3.0) - 2026-11-15
 

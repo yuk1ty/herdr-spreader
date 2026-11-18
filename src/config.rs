@@ -2,24 +2,28 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-#[derive(Debug, Default, Clone, Deserialize, PartialEq)]
+fn is_default<T: Default + PartialEq>(value: &T) -> bool {
+    *value == T::default()
+}
+
+#[derive(Debug, Default, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Workspace {
     pub name: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root: Option<PathBuf>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
     #[serde(default)]
     pub tabs: Vec<Tab>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub focus: bool,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct SpreadFile {
     pub workspaces: Vec<Workspace>,
@@ -38,35 +42,41 @@ impl SpreadFile {
     }
 }
 
-#[derive(Debug, Default, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Default, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Tab {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<PathBuf>,
     #[serde(default)]
     pub panes: Vec<Pane>,
 }
 
-#[derive(Debug, Default, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Default, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Pane {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<PathBuf>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub split: SplitDirection,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ratio: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait_for: Option<WaitFor>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub focus: bool,
 }
 
-#[derive(Debug, Default, Clone, Copy, Deserialize, PartialEq)]
+#[derive(Debug, Default, Clone, Copy, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum SplitDirection {
     #[default]
@@ -74,11 +84,12 @@ pub enum SplitDirection {
     Down,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct WaitFor {
     #[serde(rename = "match")]
     pub pattern: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
 }
 
@@ -848,6 +859,84 @@ workspaces:
             resolved.workspaces[1].root,
             Some(PathBuf::from("/home/demo/project"))
         );
+    }
+
+    #[test]
+    fn should_round_trip_a_branching_spread_file_through_yaml_without_null_defaults() {
+        let file = SpreadFile {
+            workspaces: vec![
+                Workspace {
+                    name: "alpha".to_string(),
+                    root: None,
+                    env: BTreeMap::new(),
+                    tabs: vec![Tab {
+                        label: Some("main".to_string()),
+                        cwd: None,
+                        panes: vec![
+                            Pane {
+                                id: Some("editor".to_string()),
+                                cwd: Some(PathBuf::from("/home/demo/project")),
+                                ..Default::default()
+                            },
+                            Pane {
+                                id: Some("agent".to_string()),
+                                split: SplitDirection::Right,
+                                ratio: Some(119.0 / 396.0),
+                                cwd: Some(PathBuf::from("/home/demo/project/logs")),
+                                focus: true,
+                                ..Default::default()
+                            },
+                            Pane {
+                                from: Some("editor".to_string()),
+                                split: SplitDirection::Down,
+                                ratio: Some(0.5),
+                                ..Default::default()
+                            },
+                        ],
+                    }],
+                    focus: true,
+                },
+                Workspace {
+                    name: "beta".to_string(),
+                    root: Some(PathBuf::from("/proj")),
+                    env: BTreeMap::from([("RUST_LOG".to_string(), "debug".to_string())]),
+                    tabs: vec![Tab {
+                        label: Some("1".to_string()),
+                        cwd: Some(PathBuf::from("./svc")),
+                        panes: vec![Pane {
+                            command: Some("cargo run".to_string()),
+                            wait_for: Some(WaitFor {
+                                pattern: "Compiling".to_string(),
+                                timeout_ms: Some(10_000),
+                            }),
+                            ..Default::default()
+                        }],
+                    }],
+                    focus: false,
+                },
+            ],
+        };
+
+        let yaml = serde_yaml_ng::to_string(&file).unwrap();
+        assert!(
+            !yaml.contains("null"),
+            "no field may serialize as null: {yaml}"
+        );
+        assert!(
+            !yaml.contains("split: right"),
+            "the default split direction must be omitted: {yaml}"
+        );
+        assert!(
+            !yaml.contains("focus: false"),
+            "false focus flags must be omitted: {yaml}"
+        );
+        assert!(
+            !yaml.contains("root:") || yaml.contains("root: /proj"),
+            "an absent root must be omitted entirely: {yaml}"
+        );
+
+        let parsed = SpreadFile::from_str(&yaml).unwrap();
+        assert_eq!(parsed, file);
     }
 
     #[test]
