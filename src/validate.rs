@@ -128,8 +128,8 @@ fn validate_pane_split_sources(
     tab: &crate::config::Tab,
 ) -> Vec<ValidationFinding> {
     let mut findings = Vec::new();
-    let all_pane_ids: HashSet<&str> = tab.panes.iter().filter_map(|p| p.id.as_deref()).collect();
-    let mut earlier_pane_ids: HashSet<&str> = HashSet::new();
+    let all_pane_ids: Vec<&str> = tab.panes.iter().filter_map(|p| p.id.as_deref()).collect();
+    let mut earlier_pane_ids: Vec<&str> = Vec::new();
 
     for (pane_index, pane) in tab.panes.iter().enumerate() {
         if let Some(from) = pane.from.as_deref() {
@@ -140,8 +140,8 @@ fn validate_pane_split_sources(
                         "the first pane in tab '{tab_label}' of workspace '{ws_name}' cannot use `from`: it is the tab's root pane, not a split"
                     ),
                 });
-            } else if !earlier_pane_ids.contains(from) {
-                let reason = if all_pane_ids.contains(from) {
+            } else if !earlier_pane_ids.contains(&from) {
+                let reason = if all_pane_ids.contains(&from) {
                     "`from` may only reference a pane declared earlier in the same tab"
                 } else {
                     "no pane in this tab declares that id"
@@ -163,7 +163,7 @@ fn validate_pane_split_sources(
                         "pane id in tab '{tab_label}' of workspace '{ws_name}' must not be empty"
                     ),
                 });
-            } else if !earlier_pane_ids.insert(id) {
+            } else if earlier_pane_ids.contains(&id) {
                 findings.push(ValidationFinding {
                     severity: Severity::Error,
                     message: format!(
@@ -171,6 +171,7 @@ fn validate_pane_split_sources(
                     ),
                 });
             }
+            earlier_pane_ids.push(id);
         }
     }
 
