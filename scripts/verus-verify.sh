@@ -9,4 +9,4 @@ set -eu
 VERUS_BIN_DIR="${VERUS_BIN_DIR:-$HOME/tools/verus-arm64-macos}"
 export PATH="$VERUS_BIN_DIR:$PATH"
 
-exec cargo verus verify
+exec cargo verus verify --features verus

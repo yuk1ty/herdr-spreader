@@ -3,8 +3,10 @@
 The pure logic of this crate carries machine-checked specifications, verified
 with [Verus](https://github.com/verus-lang/verus). Specifications are written
 inline in the Rust sources with `#[verus_spec(...)]` attributes and `verus!`
-blocks. When the crate is built with the normal Rust toolchain, all
-specification and proof code is erased; verification is a separate step.
+blocks. `src/proofs.rs` holds the shared spec definitions and proof lemmas
+for the validation rules. When the crate is built with the normal Rust
+toolchain, all specification and proof code is erased; verification is a
+separate step.
 
 ## Tooling
 
