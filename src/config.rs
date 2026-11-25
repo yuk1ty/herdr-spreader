@@ -316,7 +316,7 @@ workspaces:
         let file = SpreadFile::from_str(yaml).unwrap();
 
         assert_eq!(file.workspaces[0].name, "demo");
-        assert!(file.workspaces[0].tabs.is_empty());
+        assert_eq!(file.workspaces[0].tabs, []);
         assert_eq!(file.workspaces[0].root, None);
     }
 
@@ -615,8 +615,7 @@ workspaces:
     }
 
     #[test]
-    fn should_list_all_candidate_paths_for_plugin_xdg_and_home_in_order_without_touching_the_filesystem()
-     {
+    fn should_list_all_candidate_paths_for_plugin_xdg_and_home_in_order() {
         let mut env = BTreeMap::new();
         env.insert("HERDR_PLUGIN_CONFIG_DIR".to_string(), "/cfg".to_string());
         env.insert("XDG_CONFIG_HOME".to_string(), "/xdg".to_string());
