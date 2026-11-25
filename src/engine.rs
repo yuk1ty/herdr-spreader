@@ -761,10 +761,10 @@ mod tests {
         fn should_make_no_backend_calls_given_empty_workspaces_list() {
             let file = SpreadFile { workspaces: vec![] };
             let plan = engine::plan_file(&file, &ExistingWorkspaces::default());
-            assert!(plan.is_empty());
+            assert_eq!(plan, []);
             let mut rec = RecordingBackend::default();
             engine::execute_plan(&plan, &mut rec).unwrap();
-            assert!(rec.log.is_empty());
+            assert_eq!(rec.log, [] as [String; 0]);
         }
 
         #[test]
