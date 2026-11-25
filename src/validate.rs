@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use crate::config::SpreadFile;
+use crate::config::{SpreadFile, Tab};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Severity {
@@ -118,64 +118,101 @@ pub(crate) fn validate(file: &SpreadFile) -> Vec<ValidationFinding> {
     findings
 }
 
+/// A pane split-rule violation, identified by pane index within the tab.
+///
+/// The decision kernel ([`pane_split_findings`]) produces these; the message
+/// layer turns them into user-facing [`ValidationFinding`]s.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SplitFinding {
+    /// Pane 0 used `from`, but it is the tab's root pane, not a split.
+    RootPaneFrom { pane: usize },
+    /// A non-first pane used `from` that no earlier pane in the tab declared.
+    FromInvalid { pane: usize },
+    /// A pane declared an empty id.
+    EmptyPaneId { pane: usize },
+    /// A pane declared an id an earlier pane in the same tab already declared.
+    DuplicatePaneId { pane: usize },
+}
+
 /// Check a tab's pane `id`/`from` declarations: ids must be non-empty and
 /// unique within the tab, and `from` must reference an id declared on an
 /// earlier pane of the same tab (the first pane, being the tab's root rather
 /// than a split, cannot use `from` at all).
-fn validate_pane_split_sources(
-    ws_name: &str,
-    tab_label: &str,
-    tab: &crate::config::Tab,
-) -> Vec<ValidationFinding> {
+pub(crate) fn pane_split_findings(tab: &Tab) -> Vec<SplitFinding> {
     let mut findings = Vec::new();
-    let all_pane_ids: Vec<&str> = tab.panes.iter().filter_map(|p| p.id.as_deref()).collect();
-    let mut earlier_pane_ids: Vec<&str> = Vec::new();
+    let mut earlier_pane_ids: Vec<&String> = Vec::new();
+    let mut pane_index = 0;
 
-    for (pane_index, pane) in tab.panes.iter().enumerate() {
-        if let Some(from) = pane.from.as_deref() {
+    while pane_index < tab.panes.len() {
+        let pane = &tab.panes[pane_index];
+        if let Some(from) = &pane.from {
             if pane_index == 0 {
-                findings.push(ValidationFinding {
-                    severity: Severity::Error,
-                    message: format!(
-                        "the first pane in tab '{tab_label}' of workspace '{ws_name}' cannot use `from`: it is the tab's root pane, not a split"
-                    ),
-                });
+                findings.push(SplitFinding::RootPaneFrom { pane: pane_index });
             } else if !earlier_pane_ids.contains(&from) {
-                let reason = if all_pane_ids.contains(&from) {
-                    "`from` may only reference a pane declared earlier in the same tab"
-                } else {
-                    "no pane in this tab declares that id"
-                };
-                findings.push(ValidationFinding {
-                    severity: Severity::Error,
-                    message: format!(
-                        "pane `from: {from}` in tab '{tab_label}' of workspace '{ws_name}' is invalid: {reason}"
-                    ),
-                });
+                findings.push(SplitFinding::FromInvalid { pane: pane_index });
             }
         }
-
-        if let Some(id) = pane.id.as_deref() {
+        if let Some(id) = &pane.id {
             if id.is_empty() {
-                findings.push(ValidationFinding {
-                    severity: Severity::Error,
-                    message: format!(
-                        "pane id in tab '{tab_label}' of workspace '{ws_name}' must not be empty"
-                    ),
-                });
+                findings.push(SplitFinding::EmptyPaneId { pane: pane_index });
             } else if earlier_pane_ids.contains(&id) {
-                findings.push(ValidationFinding {
-                    severity: Severity::Error,
-                    message: format!(
-                        "duplicate pane id '{id}' in tab '{tab_label}' of workspace '{ws_name}'"
-                    ),
-                });
+                findings.push(SplitFinding::DuplicatePaneId { pane: pane_index });
+            } else {
+                earlier_pane_ids.push(id);
             }
-            earlier_pane_ids.push(id);
         }
+        pane_index += 1;
     }
 
     findings
+}
+
+/// Check a tab's pane `id`/`from` declarations and report findings with
+/// human-readable messages.
+fn validate_pane_split_sources(
+    ws_name: &str,
+    tab_label: &str,
+    tab: &Tab,
+) -> Vec<ValidationFinding> {
+    let all_pane_ids: Vec<&str> = tab.panes.iter().filter_map(|p| p.id.as_deref()).collect();
+    pane_split_findings(tab)
+        .into_iter()
+        .map(|finding| {
+            let message = match &finding {
+                SplitFinding::RootPaneFrom { .. } => format!(
+                    "the first pane in tab '{tab_label}' of workspace '{ws_name}' cannot use `from`: it is the tab's root pane, not a split"
+                ),
+                SplitFinding::FromInvalid { pane } => {
+                    let from = tab.panes[*pane]
+                        .from
+                        .as_deref()
+                        .expect("FromInvalid names a pane with `from` set");
+                    let reason = if all_pane_ids.contains(&from) {
+                        "`from` may only reference a pane declared earlier in the same tab"
+                    } else {
+                        "no pane in this tab declares that id"
+                    };
+                    format!(
+                        "pane `from: {from}` in tab '{tab_label}' of workspace '{ws_name}' is invalid: {reason}"
+                    )
+                }
+                SplitFinding::EmptyPaneId { .. } => format!(
+                    "pane id in tab '{tab_label}' of workspace '{ws_name}' must not be empty"
+                ),
+                SplitFinding::DuplicatePaneId { pane } => {
+                    let id = tab.panes[*pane]
+                        .id
+                        .as_deref()
+                        .expect("DuplicatePaneId names a pane with an id");
+                    format!("duplicate pane id '{id}' in tab '{tab_label}' of workspace '{ws_name}'")
+                }
+            };
+            ValidationFinding {
+                severity: Severity::Error,
+                message,
+            }
+        })
+        .collect()
 }
 
 pub fn print_findings(findings: &[ValidationFinding]) {
@@ -554,6 +591,68 @@ mod tests {
         ]);
         let findings = validate(&file);
         assert!(findings.is_empty(), "unexpected findings: {findings:?}");
+    }
+
+    #[test]
+    fn should_report_no_kernel_findings_given_valid_branching_layout() {
+        let tab = single_tab(vec![
+            pane_with_id("editor"),
+            Pane {
+                id: Some("agent".to_string()),
+                from: Some("editor".to_string()),
+                ..Default::default()
+            },
+            pane_from("editor"),
+        ]);
+        assert_eq!(pane_split_findings(&tab), vec![]);
+    }
+
+    #[test]
+    fn should_report_root_from_and_invalid_from_in_pane_order() {
+        let tab = single_tab(vec![pane_from("editor"), pane_from("git")]);
+        assert_eq!(
+            pane_split_findings(&tab),
+            vec![
+                SplitFinding::RootPaneFrom { pane: 0 },
+                SplitFinding::FromInvalid { pane: 1 },
+            ]
+        );
+    }
+
+    #[test]
+    fn should_report_empty_and_duplicate_ids_in_pane_order() {
+        let tab = single_tab(vec![
+            pane_with_id(""),
+            pane_with_id("editor"),
+            pane_with_id("editor"),
+        ]);
+        assert_eq!(
+            pane_split_findings(&tab),
+            vec![
+                SplitFinding::EmptyPaneId { pane: 0 },
+                SplitFinding::DuplicatePaneId { pane: 2 },
+            ]
+        );
+    }
+
+    #[test]
+    fn should_not_register_empty_ids_as_earlier_ids() {
+        let tab = single_tab(vec![pane_with_id(""), pane_with_id("")]);
+        assert_eq!(
+            pane_split_findings(&tab),
+            vec![
+                SplitFinding::EmptyPaneId { pane: 0 },
+                SplitFinding::EmptyPaneId { pane: 1 },
+            ]
+        );
+    }
+
+    fn single_tab(panes: Vec<Pane>) -> Tab {
+        Tab {
+            label: Some("main".to_string()),
+            panes,
+            ..Default::default()
+        }
     }
 
     #[test]
