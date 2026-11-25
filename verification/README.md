@@ -3,8 +3,10 @@
 The pure logic of this crate carries machine-checked specifications, verified
 with [Verus](https://github.com/verus-lang/verus). Specifications are written
 inline in the Rust sources with `#[verus_spec(...)]` attributes and `verus!`
-blocks. When the crate is built with the normal Rust toolchain, all
-specification and proof code is erased; verification is a separate step.
+blocks. `src/proofs.rs` holds the shared spec definitions and proof lemmas
+for the validation rules. When the crate is built with the normal Rust
+toolchain, all specification and proof code is erased; verification is a
+separate step.
 
 ## Tooling
 
@@ -32,13 +34,20 @@ crate through Cargo, so verification always checks the same sources that
 
 ## What is verified
 
-Run `scripts/verus-verify.sh`; the expected result is `3 verified, 0 errors`.
+Run `scripts/verus-verify.sh`; the expected result is `13 verified, 0 errors`.
 
 | Module | Function | Property |
 |---|---|---|
 | `shell_quote` | `quote_chars` | Returns exactly the spec model `quoted_prefix` of its input: each char passes through, each `'` becomes `'\''`. |
+| `validate` | `pane_split_findings` | Reports no finding if and only if the pane signatures satisfy `split_rules_ok`: the first pane is not a split, every `from` names a non-empty id declared on an earlier pane, and ids are non-empty and unique within the tab. |
+
+The `validate` contract is the trust boundary the planner relies on: configs
+that pass validation cannot make `plan_workspace` panic on split-source
+resolution.
 
 ## Trusted computing base
 
 - `shell_quote` itself is `#[verus_verify(external_body)]`: its body only runs the standard-library conversions `str::chars` and `String: FromIterator<char>`, for which vstd has no specifications. The quoting logic that can carry a quoting bug lives in the verified `quote_chars`.
+- `validate_pane_split_sources` trusts the projection of `Pane` id/from fields into `PaneSig` tuples (a `.map` over the panes); all decisions are verified over the signatures.
+
 

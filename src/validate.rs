@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use crate::config::{SpreadFile, Tab};
+use crate::proofs::PaneSig;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Severity {
@@ -118,12 +119,27 @@ pub(crate) fn validate(file: &SpreadFile) -> Vec<ValidationFinding> {
     findings
 }
 
+use verus_builtin_macros::{verus, verus_verify};
+// Used only by the `verus!` block below; erased builds see no vstd items.
+#[allow(unused_imports)]
+use vstd::prelude::*;
+
+verus! {
+
+#[cfg(feature = "verus")]
+use crate::proofs::{
+    declares_nonempty_id, declared_ids, lemma_declared_ids_member,
+    lemma_declared_ids_witness, lemma_duplicate_id_breaks_rules,
+    lemma_from_invalid_breaks_rules, sig_from_chars, sig_id_chars, split_rules_ok,
+    split_rules_ok_up_to,
+};
+
 /// A pane split-rule violation, identified by pane index within the tab.
 ///
 /// The decision kernel ([`pane_split_findings`]) produces these; the message
 /// layer turns them into user-facing [`ValidationFinding`]s.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum SplitFinding {
+pub enum SplitFinding {
     /// Pane 0 used `from`, but it is the tab's root pane, not a split.
     RootPaneFrom { pane: usize },
     /// A non-first pane used `from` that no earlier pane in the tab declared.
@@ -134,38 +150,141 @@ pub(crate) enum SplitFinding {
     DuplicatePaneId { pane: usize },
 }
 
-/// Check a tab's pane `id`/`from` declarations: ids must be non-empty and
-/// unique within the tab, and `from` must reference an id declared on an
-/// earlier pane of the same tab (the first pane, being the tab's root rather
-/// than a split, cannot use `from` at all).
-pub(crate) fn pane_split_findings(tab: &Tab) -> Vec<SplitFinding> {
-    let mut findings = Vec::new();
-    let mut earlier_pane_ids: Vec<&String> = Vec::new();
-    let mut pane_index = 0;
+/// A lemma-side membership check, verified against its spec so the kernel's
+/// `contains` calls are not opaque to the prover.
+#[verus_verify(rlimit(20))]
+fn contains_id(ids: &[String], target: &String) -> (found: bool)
+    ensures
+        found == exists|k: int| 0 <= k < ids@.len() && ids@[k]@ == target@,
+{
+    let mut found: bool = false;
+    let mut k: usize = 0;
+    while k < ids.len()
+        invariant
+            k <= ids@.len(),
+            found == (exists|j: int| 0 <= j < k && ids@[j]@ == target@),
+        decreases ids@.len() - k,
+    {
+        found = found || ids[k] == *target;
+        proof {
+            assert(found == (exists|j: int| 0 <= j < k + 1 && ids@[j]@ == target@));
+        }
+        k += 1;
+    }
+    found
+}
 
-    while pane_index < tab.panes.len() {
-        let pane = &tab.panes[pane_index];
-        if let Some(from) = &pane.from {
+/// Check a sequence of pane signatures against the split rules.
+///
+/// Reports no finding exactly when the signatures satisfy the split rules
+/// ([`split_rules_ok`]): the first pane is not a split, every `from` names an
+/// id declared on an earlier pane, and ids are non-empty and unique within
+/// the sequence.
+#[verus_verify(rlimit(60))]
+fn pane_split_findings(sigs: &[PaneSig]) -> (findings: Vec<SplitFinding>)
+    ensures
+        findings@.len() == 0 <==> split_rules_ok(sigs@),
+{
+    let mut findings: Vec<SplitFinding> = Vec::new();
+    let mut earlier_pane_ids: Vec<String> = Vec::new();
+    let mut pane_index: usize = 0;
+    while pane_index < sigs.len()
+        invariant
+            pane_index <= sigs@.len(),
+            earlier_pane_ids@ == declared_ids(sigs@, pane_index as int),
+            findings@.len() == 0 <==> split_rules_ok_up_to(sigs@, pane_index as int),
+        decreases sigs@.len() - pane_index,
+    {
+        let sig = &sigs[pane_index];
+        let ghost i = pane_index as int;
+        proof {
+            assert(sigs@[i] == *sig);
+            assert(sigs@[i].0 == sig.0);
+            assert(sigs@[i].1 == sig.1);
+        }
+        let from_declared: bool = match &sig.1 {
+            Some(from) => contains_id(&earlier_pane_ids, from),
+            None => false,
+        };
+        let id_duplicate: bool = match &sig.0 {
+            Some(id) if !id.is_empty() => contains_id(&earlier_pane_ids, id),
+            _ => false,
+        };
+        if let Some(from) = &sig.1 {
+            let _ = from;
             if pane_index == 0 {
                 findings.push(SplitFinding::RootPaneFrom { pane: pane_index });
-            } else if !earlier_pane_ids.contains(&from) {
+                proof {
+                    assert(sigs@[0].1 is Some);
+                    assert(!split_rules_ok_up_to(sigs@, i + 1));
+                };
+            } else if !from_declared {
                 findings.push(SplitFinding::FromInvalid { pane: pane_index });
+                proof {
+                    assert(from@ == sig_from_chars(sigs@[i]));
+                    lemma_from_invalid_breaks_rules(sigs@, earlier_pane_ids@, i);
+                };
+            } else {
+                proof {
+                    assert(from@ == sig_from_chars(sigs@[i]));
+                    assert(exists|k: int|
+                        0 <= k < earlier_pane_ids@.len()
+                            && earlier_pane_ids@[k]@ == sig_from_chars(sigs@[i]));
+                    lemma_declared_ids_witness(sigs@, i, sig_from_chars(sigs@[i]));
+                };
             }
         }
-        if let Some(id) = &pane.id {
+        if let Some(id) = &sig.0 {
             if id.is_empty() {
                 findings.push(SplitFinding::EmptyPaneId { pane: pane_index });
-            } else if earlier_pane_ids.contains(&id) {
+                proof {
+                    assert(!declares_nonempty_id(sigs@, i));
+                    assert(!split_rules_ok_up_to(sigs@, i + 1));
+                };
+            } else if id_duplicate {
                 findings.push(SplitFinding::DuplicatePaneId { pane: pane_index });
+                proof {
+                    assert(id@ == sig_id_chars(sigs@[i]));
+                    lemma_duplicate_id_breaks_rules(sigs@, i);
+                };
             } else {
-                earlier_pane_ids.push(id);
+                proof {
+                    if findings@.len() == 0 {
+                        assert forall|q: int|
+                            0 <= q < i && sigs@[q].0 is Some
+                            implies sig_id_chars(sigs@[q]) != sig_id_chars(sigs@[i])
+                        by {
+                            if sig_id_chars(sigs@[q]) == sig_id_chars(sigs@[i]) {
+                                lemma_declared_ids_member(sigs@, i, q);
+                                assert(id_duplicate);
+                                assert(false);
+                            }
+                        }
+                    }
+                }
+                earlier_pane_ids.push(id.clone());
+                proof {
+                    assert(declares_nonempty_id(sigs@, i));
+                    assert(earlier_pane_ids@ == declared_ids(sigs@, i + 1));
+                };
+            }
+        }
+        proof {
+            if findings@.len() == 0 {
+                // No finding was produced for pane i, so pane i satisfies the
+                // rules; earlier panes satisfy them by the invariant.
+                if sig.0 is Some && sig_id_chars(sigs@[i]).len() == 0 {
+                    assert(false);
+                }
+                assert(split_rules_ok_up_to(sigs@, i + 1));
             }
         }
         pane_index += 1;
     }
-
     findings
 }
+
+} // verus!
 
 /// Check a tab's pane `id`/`from` declarations and report findings with
 /// human-readable messages.
@@ -175,7 +294,12 @@ fn validate_pane_split_sources(
     tab: &Tab,
 ) -> Vec<ValidationFinding> {
     let all_pane_ids: Vec<&str> = tab.panes.iter().filter_map(|p| p.id.as_deref()).collect();
-    pane_split_findings(tab)
+    let sigs: Vec<PaneSig> = tab
+        .panes
+        .iter()
+        .map(|p| (p.id.clone(), p.from.clone()))
+        .collect();
+    pane_split_findings(&sigs)
         .into_iter()
         .map(|finding| {
             let message = match &finding {
@@ -183,8 +307,8 @@ fn validate_pane_split_sources(
                     "the first pane in tab '{tab_label}' of workspace '{ws_name}' cannot use `from`: it is the tab's root pane, not a split"
                 ),
                 SplitFinding::FromInvalid { pane } => {
-                    let from = tab.panes[*pane]
-                        .from
+                    let from = sigs[*pane]
+                        .1
                         .as_deref()
                         .expect("FromInvalid names a pane with `from` set");
                     let reason = if all_pane_ids.contains(&from) {
@@ -200,8 +324,8 @@ fn validate_pane_split_sources(
                     "pane id in tab '{tab_label}' of workspace '{ws_name}' must not be empty"
                 ),
                 SplitFinding::DuplicatePaneId { pane } => {
-                    let id = tab.panes[*pane]
-                        .id
+                    let id = sigs[*pane]
+                        .0
                         .as_deref()
                         .expect("DuplicatePaneId names a pane with an id");
                     format!("duplicate pane id '{id}' in tab '{tab_label}' of workspace '{ws_name}'")
@@ -593,25 +717,25 @@ mod tests {
         assert!(findings.is_empty(), "unexpected findings: {findings:?}");
     }
 
+    fn sig(id: Option<&str>, from: Option<&str>) -> (Option<String>, Option<String>) {
+        (id.map(str::to_string), from.map(str::to_string))
+    }
+
     #[test]
     fn should_report_no_kernel_findings_given_valid_branching_layout() {
-        let tab = single_tab(vec![
-            pane_with_id("editor"),
-            Pane {
-                id: Some("agent".to_string()),
-                from: Some("editor".to_string()),
-                ..Default::default()
-            },
-            pane_from("editor"),
-        ]);
-        assert_eq!(pane_split_findings(&tab), vec![]);
+        let sigs = vec![
+            sig(Some("editor"), None),
+            sig(Some("agent"), Some("editor")),
+            sig(None, Some("editor")),
+        ];
+        assert_eq!(pane_split_findings(&sigs), vec![]);
     }
 
     #[test]
     fn should_report_root_from_and_invalid_from_in_pane_order() {
-        let tab = single_tab(vec![pane_from("editor"), pane_from("git")]);
+        let sigs = vec![sig(None, Some("editor")), sig(None, Some("git"))];
         assert_eq!(
-            pane_split_findings(&tab),
+            pane_split_findings(&sigs),
             vec![
                 SplitFinding::RootPaneFrom { pane: 0 },
                 SplitFinding::FromInvalid { pane: 1 },
@@ -621,13 +745,13 @@ mod tests {
 
     #[test]
     fn should_report_empty_and_duplicate_ids_in_pane_order() {
-        let tab = single_tab(vec![
-            pane_with_id(""),
-            pane_with_id("editor"),
-            pane_with_id("editor"),
-        ]);
+        let sigs = vec![
+            sig(Some(""), None),
+            sig(Some("editor"), None),
+            sig(Some("editor"), None),
+        ];
         assert_eq!(
-            pane_split_findings(&tab),
+            pane_split_findings(&sigs),
             vec![
                 SplitFinding::EmptyPaneId { pane: 0 },
                 SplitFinding::DuplicatePaneId { pane: 2 },
@@ -637,22 +761,14 @@ mod tests {
 
     #[test]
     fn should_not_register_empty_ids_as_earlier_ids() {
-        let tab = single_tab(vec![pane_with_id(""), pane_with_id("")]);
+        let sigs = vec![sig(Some(""), None), sig(Some(""), None)];
         assert_eq!(
-            pane_split_findings(&tab),
+            pane_split_findings(&sigs),
             vec![
                 SplitFinding::EmptyPaneId { pane: 0 },
                 SplitFinding::EmptyPaneId { pane: 1 },
             ]
         );
-    }
-
-    fn single_tab(panes: Vec<Pane>) -> Tab {
-        Tab {
-            label: Some("main".to_string()),
-            panes,
-            ..Default::default()
-        }
     }
 
     #[test]

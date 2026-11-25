@@ -19,6 +19,9 @@ vstd = "=0.0.0-2026-11-22-0344"
 [lints.clippy]
 pedantic = "warn"
 
+[features]
+verus = []
+
 [package.metadata.verus]
 verify = true
 
