@@ -34,7 +34,7 @@ crate through Cargo, so verification always checks the same sources that
 
 ## What is verified
 
-Run `scripts/verus-verify.sh`; the expected result is `11 verified, 0 errors`.
+Run `scripts/verus-verify.sh`; the expected result is `13 verified, 0 errors`.
 
 | Module | Function | Property |
 |---|---|---|

@@ -128,9 +128,10 @@ verus! {
 
 #[cfg(feature = "verus")]
 use crate::proofs::{
-    declares_nonempty_id, declared_ids, from_references_earlier,
-    lemma_declared_ids_member, lemma_declared_ids_witness, sig_from_chars,
-    sig_id_chars, split_rules_ok, split_rules_ok_up_to,
+    declares_nonempty_id, declared_ids, lemma_declared_ids_member,
+    lemma_declared_ids_witness, lemma_duplicate_id_breaks_rules,
+    lemma_from_invalid_breaks_rules, sig_from_chars, sig_id_chars, split_rules_ok,
+    split_rules_ok_up_to,
 };
 
 /// A pane split-rule violation, identified by pane index within the tab.
@@ -152,7 +153,7 @@ pub enum SplitFinding {
 /// A lemma-side membership check, verified against its spec so the kernel's
 /// `contains` calls are not opaque to the prover.
 #[verus_verify(rlimit(20))]
-fn contains_id(ids: &Vec<String>, target: &String) -> (found: bool)
+fn contains_id(ids: &[String], target: &String) -> (found: bool)
     ensures
         found == exists|k: int| 0 <= k < ids@.len() && ids@[k]@ == target@,
 {
@@ -180,7 +181,7 @@ fn contains_id(ids: &Vec<String>, target: &String) -> (found: bool)
 /// id declared on an earlier pane, and ids are non-empty and unique within
 /// the sequence.
 #[verus_verify(rlimit(60))]
-fn pane_split_findings(sigs: &Vec<PaneSig>) -> (findings: Vec<SplitFinding>)
+fn pane_split_findings(sigs: &[PaneSig]) -> (findings: Vec<SplitFinding>)
     ensures
         findings@.len() == 0 <==> split_rules_ok(sigs@),
 {
@@ -216,24 +217,13 @@ fn pane_split_findings(sigs: &Vec<PaneSig>) -> (findings: Vec<SplitFinding>)
                 proof {
                     assert(sigs@[0].1 is Some);
                     assert(!split_rules_ok_up_to(sigs@, i + 1));
-                }
+                };
             } else if !from_declared {
                 findings.push(SplitFinding::FromInvalid { pane: pane_index });
                 proof {
-                    if from_references_earlier(sigs@, i) {
-                        let j = choose|j: int|
-                            0 <= j < i && declares_nonempty_id(sigs@, j)
-                                && sig_id_chars(sigs@[j]) == sig_from_chars(sigs@[i]);
-                        lemma_declared_ids_member(sigs@, i, j);
-                        assert(exists|k: int|
-                            0 <= k < earlier_pane_ids@.len()
-                                && earlier_pane_ids@[k]@ == sig_from_chars(sigs@[i]));
-                        assert(from_declared);
-                        assert(false);
-                    }
-                    assert(!from_references_earlier(sigs@, i));
-                    assert(!split_rules_ok_up_to(sigs@, i + 1));
-                }
+                    assert(from@ == sig_from_chars(sigs@[i]));
+                    lemma_from_invalid_breaks_rules(sigs@, earlier_pane_ids@, i);
+                };
             } else {
                 proof {
                     assert(from@ == sig_from_chars(sigs@[i]));
@@ -241,7 +231,7 @@ fn pane_split_findings(sigs: &Vec<PaneSig>) -> (findings: Vec<SplitFinding>)
                         0 <= k < earlier_pane_ids@.len()
                             && earlier_pane_ids@[k]@ == sig_from_chars(sigs@[i]));
                     lemma_declared_ids_witness(sigs@, i, sig_from_chars(sigs@[i]));
-                }
+                };
             }
         }
         if let Some(id) = &sig.0 {
@@ -250,19 +240,13 @@ fn pane_split_findings(sigs: &Vec<PaneSig>) -> (findings: Vec<SplitFinding>)
                 proof {
                     assert(!declares_nonempty_id(sigs@, i));
                     assert(!split_rules_ok_up_to(sigs@, i + 1));
-                }
+                };
             } else if id_duplicate {
                 findings.push(SplitFinding::DuplicatePaneId { pane: pane_index });
                 proof {
-                    let k = choose|k: int|
-                        0 <= k < earlier_pane_ids@.len()
-                            && earlier_pane_ids@[k]@ == sig_id_chars(sigs@[i]);
-                    assert(exists|kk: int|
-                        0 <= kk < declared_ids(sigs@, i).len()
-                            && declared_ids(sigs@, i)[kk]@ == sig_id_chars(sigs@[i]));
-                    lemma_declared_ids_witness(sigs@, i, sig_id_chars(sigs@[i]));
-                    assert(!split_rules_ok_up_to(sigs@, i + 1));
-                }
+                    assert(id@ == sig_id_chars(sigs@[i]));
+                    lemma_duplicate_id_breaks_rules(sigs@, i);
+                };
             } else {
                 proof {
                     if findings@.len() == 0 {
@@ -282,7 +266,7 @@ fn pane_split_findings(sigs: &Vec<PaneSig>) -> (findings: Vec<SplitFinding>)
                 proof {
                     assert(declares_nonempty_id(sigs@, i));
                     assert(earlier_pane_ids@ == declared_ids(sigs@, i + 1));
-                }
+                };
             }
         }
         proof {

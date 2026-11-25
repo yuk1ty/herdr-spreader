@@ -138,4 +138,38 @@ pub proof fn lemma_declared_ids_witness(sigs: Seq<PaneSig>, i: int, v: Seq<char>
     }
 }
 
+/// A non-first pane whose `from` matches no earlier declared id breaks the
+/// split rules, so the rules cannot hold past pane `i`.
+pub proof fn lemma_from_invalid_breaks_rules(sigs: Seq<PaneSig>, earlier: Seq<String>, i: int)
+    requires
+        i > 0,
+        i < sigs.len(),
+        sigs[i].1 is Some,
+        earlier == declared_ids(sigs, i),
+        !exists|k: int| 0 <= k < earlier.len() && earlier[k]@ == sig_from_chars(sigs[i]),
+    ensures
+        !split_rules_ok_up_to(sigs, i + 1),
+{
+    if from_references_earlier(sigs, i) {
+        let j = choose|j: int|
+            0 <= j < i && declares_nonempty_id(sigs, j)
+                && sig_id_chars(sigs[j]) == sig_from_chars(sigs[i]);
+        lemma_declared_ids_member(sigs, i, j);
+        assert(false);
+    }
+}
+
+/// A non-empty id matching one declared earlier breaks the split rules.
+pub proof fn lemma_duplicate_id_breaks_rules(sigs: Seq<PaneSig>, i: int)
+    requires
+        i < sigs.len(),
+        exists|k: int|
+            0 <= k < declared_ids(sigs, i).len()
+                && declared_ids(sigs, i)[k]@ == sig_id_chars(sigs[i]),
+    ensures
+        !split_rules_ok_up_to(sigs, i + 1),
+{
+    lemma_declared_ids_witness(sigs, i, sig_id_chars(sigs[i]));
+}
+
 } // verus!
