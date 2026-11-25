@@ -201,7 +201,7 @@ mod tests {
             }],
         };
         let findings = validate(&file);
-        assert!(findings.is_empty());
+        assert_eq!(findings, []);
     }
 
     #[test]
@@ -317,7 +317,7 @@ mod tests {
             }],
         };
         let findings = validate(&file);
-        assert!(findings.is_empty());
+        assert_eq!(findings, []);
     }
 
     #[test]
@@ -336,7 +336,7 @@ mod tests {
             }],
         };
         let findings = validate(&file);
-        assert!(findings.is_empty());
+        assert_eq!(findings, []);
     }
 
     #[test]
@@ -388,7 +388,7 @@ mod tests {
             .iter()
             .filter(|f| f.message.contains("focus"))
             .collect();
-        assert!(focus_warnings.is_empty());
+        assert_eq!(focus_warnings, [] as [&ValidationFinding; 0]);
     }
 
     #[test]
@@ -410,7 +410,7 @@ mod tests {
             .iter()
             .filter(|f| f.message.contains("focus"))
             .collect();
-        assert!(focus_warnings.is_empty());
+        assert_eq!(focus_warnings, [] as [&ValidationFinding; 0]);
     }
 
     #[test]
@@ -454,7 +454,7 @@ mod tests {
             .iter()
             .filter(|f| f.message.contains("no panes"))
             .collect();
-        assert!(tab_warnings.is_empty());
+        assert_eq!(tab_warnings, [] as [&ValidationFinding; 0]);
     }
 
     #[test]
@@ -509,7 +509,7 @@ mod tests {
             .iter()
             .filter(|f| f.message.contains("wait_for"))
             .collect();
-        assert!(wait_findings.is_empty());
+        assert_eq!(wait_findings, [] as [&ValidationFinding; 0]);
     }
 
     fn pane_with_id(id: &str) -> Pane {
