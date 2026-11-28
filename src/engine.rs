@@ -9,6 +9,7 @@ use crate::backend::{
     BackendError, ExistingWorkspaces, HerdrBackend, SplitOpts, TabOpts, WorkspaceOpts,
 };
 use crate::config::{SplitDirection, SpreadFile, WaitFor, Workspace};
+use crate::shell_quote::shell_quote;
 
 fn resolve_cwd(
     root: Option<&Path>,
@@ -27,10 +28,6 @@ fn combine_cwd(base: Option<&Path>, overlay: Option<&Path>) -> Option<PathBuf> {
         (None, Some(overlay)) => Some(normalize_path(overlay)),
         (None, None) => None,
     }
-}
-
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', r"'\''"))
 }
 
 fn cwd_env_prefix(cwd: Option<&Path>, env: &BTreeMap<String, String>) -> Option<String> {
