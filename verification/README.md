@@ -32,8 +32,13 @@ crate through Cargo, so verification always checks the same sources that
 
 ## What is verified
 
+Run `scripts/verus-verify.sh`; the expected result is `3 verified, 0 errors`.
+
 | Module | Function | Property |
 |---|---|---|
-| (none yet) | | |
+| `shell_quote` | `quote_chars` | Returns exactly the spec model `quoted_prefix` of its input: each char passes through, each `'` becomes `'\''`. |
 
-Add a row here when a new function gets a specification.
+## Trusted computing base
+
+- `shell_quote` itself is `#[verus_verify(external_body)]`: its body only runs the standard-library conversions `str::chars` and `String: FromIterator<char>`, for which vstd has no specifications. The quoting logic that can carry a quoting bug lives in the verified `quote_chars`.
+
